@@ -129,7 +129,11 @@ def refresh_cache(stock_list: list, label: str = ""):
     llm_results  = analyze_stocks(stock_list)
 
     print("\n[2/2] DART 공시 분석...")
-    dart_results = score_stocks(stock_list)
+    if sc.USE_DART_SCORING:
+        dart_results = score_stocks(stock_list)
+    else:
+        print("  [DART] USE_DART_SCORING=False — 건너뜀")
+        dart_results = {s["code"]: {"score": 0, "reason": "비활성화"} for s in stock_list}
 
     # 캐시 병합
     cache  = _load_cache()

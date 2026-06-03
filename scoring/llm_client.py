@@ -42,21 +42,29 @@ def analyze_stocks(stock_list: list) -> dict:
 
 
 def _analyze_batch(batch: list) -> dict:
-    names = ", ".join(f"{s['name']}({s['code']})" for s in batch)
+    # 종목코드 목록을 명시적으로 나열 (JSON 키로 사용하도록 강제)
+    code_list = ", ".join(s["code"] for s in batch)
+    name_map  = {s["code"]: s["name"] for s in batch}
+    items     = "\n".join(f'- {s["code"]} : {s["name"]}' for s in batch)
 
-    prompt = f"""다음 한국 코스피 상장 주식들의 최근 3일간 뉴스, 공시, 시장 동향을 검색하고
-각 종목의 단기(당일~1일) 주가 상승 가능성을 평가해주세요.
+    prompt = f"""다음 한국 코스피 상장 주식들의 최근 3일간 뉴스와 시장 동향을 검색하여
+오늘 단기 주가 방향성(상승/하락/중립)을 평가해주세요.
+특정 주가 수치나 예전 뉴스는 언급하지 말고, 최근 이슈 중심으로 방향성만 답하세요.
 
-분석 대상: {names}
+분석 종목:
+{items}
 
-반드시 아래 JSON 형식으로만 답변하세요 (다른 텍스트 없이):
+반드시 아래 형식으로 JSON만 반환하세요 (종목코드를 키로 사용):
 {{
-  "종목코드": {{
+  "{batch[0]['code']}": {{
     "opinion": "bullish 또는 neutral 또는 bearish",
     "score": 정수(bullish=20, neutral=10, bearish=0),
-    "reason": "한 줄 근거 (한국어, 30자 이내)"
-  }}
-}}"""
+    "reason": "최근 이슈 한 줄 (한국어, 30자 이내)"
+  }},
+  ... (나머지 종목코드도 동일하게)
+}}
+
+반드시 모든 종목코드 [{code_list}]에 대한 결과를 포함해야 합니다."""
 
     headers = {
         "Authorization": f"Bearer {API_KEY}",
@@ -66,7 +74,7 @@ def _analyze_batch(batch: list) -> dict:
         "model":    MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
-        "max_tokens":  800,
+        "max_tokens":  1000,
     }
 
     try:
@@ -76,21 +84,27 @@ def _analyze_batch(batch: list) -> dict:
 
         # 마크다운 코드블록 제거
         if "```" in raw:
-            raw = raw.split("```")[1]
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else parts[0]
             if raw.startswith("json"):
                 raw = raw[4:]
 
         data = json.loads(raw.strip())
 
-        # 응답 정규화
+        # 응답 정규화 — 코드 또는 이름으로 유연하게 매핑
+        name_to_code = {v: k for k, v in name_map.items()}
         result = {}
         for s in batch:
             code = s["code"]
-            item = data.get(code, {})
+            # 1순위: 종목코드 키
+            item = data.get(code)
+            # 2순위: 종목명 키 (LLM이 이름을 키로 쓴 경우)
+            if item is None:
+                item = data.get(s["name"]) or data.get(s["name"].upper())
             result[code] = {
-                "score":   int(item.get("score",   10)),
-                "opinion": item.get("opinion", "neutral"),
-                "reason":  item.get("reason",  "분석 없음"),
+                "score":   int((item or {}).get("score",   10)),
+                "opinion": (item or {}).get("opinion", "neutral"),
+                "reason":  (item or {}).get("reason",  "분석 없음"),
             }
         return result
 
