@@ -66,6 +66,13 @@ with st.sidebar:
         help="고점 대비 이 % 하락 시 매도\n수익 중에 눌리면 자동 청산",
     ) / 100
 
+    max_positions = st.slider(
+        "최대 포지션 수", 1, 10, sc.MAX_POSITIONS, 1,
+        help="동시에 보유할 수 있는 최대 종목 수\n예) 3개 → 투자금을 3등분해서 각 종목에 진입",
+    )
+
+    st.caption(f"포지션당 예산 = 예수금 × {invest_ratio_pct}% ÷ {max_positions}개")
+
     pool_size = st.slider(
         "코스피 풀 크기", 10, 200, sc.KOSPI_POOL_SIZE, 10,
         help="코스피200 중 상위 N개 종목을 스크리닝\n클수록 기회 많지만 속도 느림",
@@ -76,6 +83,7 @@ with st.sidebar:
     sc.INVEST_RATIO          = invest_ratio
     sc.LOSS_RATE             = loss_rate
     sc.TRAILING_STOP_RATE    = trailing_rate
+    sc.MAX_POSITIONS         = max_positions
     sc.KOSPI_POOL_SIZE       = pool_size
 
     st.divider()
