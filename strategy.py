@@ -88,18 +88,36 @@ def calc_target_price(stock_code):
 
     return int(target)
 
-def calc_quantity(current_price):
-    """매수 수량 계산 (예수금 × 투자비율 / 현재가)"""
+def calc_position_budget():
+    """
+    포지션당 예산 계산
+    예수금 × 투자비율 / 최대포지션수
+    반환: 포지션당 투자 가능 금액 (원)
+    """
     from api import get_balance
     balance  = get_balance()
-    deposit  = int(balance["계좌요약"][0]["dnca_tot_amt"])  # 예수금
-    invest   = int(deposit * sc.INVEST_RATIO)
-    quantity = invest // current_price
+    deposit  = int(balance["계좌요약"][0]["dnca_tot_amt"])
+    total    = int(deposit * sc.INVEST_RATIO)
+    per_pos  = total // sc.MAX_POSITIONS
 
-    print(f"  예수금     : {deposit:,}원")
-    print(f"  투자금액   : {invest:,}원 ({int(sc.INVEST_RATIO*100)}%)")
+    print(f"  예수금       : {deposit:,}원")
+    print(f"  총 투자금액  : {total:,}원 ({int(sc.INVEST_RATIO*100)}%)")
+    print(f"  포지션당 예산: {per_pos:,}원 (÷{sc.MAX_POSITIONS}포지션)")
+
+    return per_pos
+
+
+def calc_quantity(current_price, budget=None):
+    """
+    매수 수량 계산
+    budget : 포지션당 예산(원). None이면 단일 포지션 방식으로 API 조회.
+    """
+    if budget is None:
+        budget = calc_position_budget()
+
+    quantity = budget // current_price
+    print(f"  투자 예산  : {budget:,}원")
     print(f"  매수 수량  : {quantity}주 (@ {current_price:,}원)")
-
     return quantity
 
 def is_market_open():
