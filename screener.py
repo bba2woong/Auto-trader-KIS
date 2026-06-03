@@ -465,20 +465,23 @@ _PATTERN_EMOJI = {
 }
 
 
-def run_screening():
+def run_screening(progress_cb=None):
     """
     전체 스크리닝 실행
+    progress_cb : (current, total, name) → None  (UI 진행률 콜백, 선택)
     그레이드: A(변동성+해머) > B(변동성) > C(해머만)
     행잉맨(hanging_man)은 매수 후보 제외, 보유 종목 경고용으로만 반환
     """
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 스크리닝 시작...")
     pool   = build_screening_pool()
     passed = []
-    warned = []   # 행잉맨 감지 종목 (매수 후보 아님, 경고용)
+    warned = []
     failed = []
 
     for i, stock in enumerate(pool):
         print(f"  [{i+1}/{len(pool)}] {stock['name']} 체크 중...", end="\r")
+        if progress_cb:
+            progress_cb(i + 1, len(pool), stock["name"])
         result = check_volatility_breakout(stock["code"])
 
         if result is None:
