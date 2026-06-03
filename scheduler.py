@@ -237,14 +237,54 @@ class PositionManager:
 # 메인 스케줄러
 # ──────────────────────────────────────────
 
+def _run_ai_cache_if_needed(stock_list, label):
+    """필요 시 AI 캐시 갱신"""
+    if not sc.USE_AI_SCORING:
+        return
+    from scoring.scorer import refresh_cache, needs_refresh
+    if needs_refresh():
+        refresh_cache(stock_list, label)
+
+
+def _score_and_route(candidate):
+    """
+    종목 총점 계산 + 라우팅 결정
+    candidate : screener.py run_screening() 반환 항목
+                (변동성돌파, AD상승, 패턴, 돌파여유율 등 포함)
+    반환      : (score_dict, route)  route = "auto_buy"|"confirm"|"skip"
+    """
+    if not sc.USE_AI_SCORING:
+        from scoring.scorer import technical_score
+        tech   = technical_score(candidate)
+        auto_t = int(sc.AUTO_BUY_SCORE    * 0.7)
+        conf_t = int(sc.CONFIRM_SCORE_MIN * 0.7)
+        route  = "auto_buy" if tech >= auto_t else "confirm" if tech >= conf_t else "skip"
+        return {"total": tech, "tech": tech, "llm": 0, "dart": 0}, route
+
+    from scoring.scorer import total_score, routing
+    score_dict = total_score(candidate)
+    route      = routing(score_dict["total"])
+    return score_dict, route
+
+
 def run_scheduler():
-    """멀티 포지션 + 5분 주기 스케줄러"""
+    """멀티 포지션 + 5분 주기 스케줄러 + AI 점수 기반 라우팅"""
     sc.print_config()
 
     use_telegram = _telegram_enabled()
     print(f"  📱 텔레그램: {'ON' if use_telegram else 'OFF'}")
     print(f"  최대 포지션: {sc.MAX_POSITIONS}개")
     print(f"  스크리닝 주기: {sc.SCREENING_INTERVAL}분")
+    print(f"  AI 점수: {'ON' if sc.USE_AI_SCORING else 'OFF'}")
+    print(f"  자동매수 Threshold: {sc.AUTO_BUY_SCORE}점 이상")
+    print(f"  확인 요청 범위: {sc.CONFIRM_SCORE_MIN}~{sc.AUTO_BUY_SCORE}점")
+
+    # 종목 풀 구성 (장 전 AI 분석용)
+    from screener import build_screening_pool
+    stock_list = build_screening_pool()
+
+    # 장 전 AI 캐시 갱신
+    _run_ai_cache_if_needed(stock_list, "장전")
 
     wait_until_market_open()
 
@@ -296,42 +336,59 @@ def run_scheduler():
             print(f"[{get_now()}] 조건 충족 종목 없음 — {sc.SCREENING_INTERVAL}분 후 재스크리닝")
             continue
 
-        # ── 종목 선택 & 포지션 오픈 ──
-        slots_to_fill = min(pm.free_slots, len(candidates))
+        # ── 오후 1시 AI 캐시 갱신 체크 ──
+        _run_ai_cache_if_needed(stock_list, "오후1시")
 
-        if use_telegram:
-            from telegram_bot import send_and_wait, notify
+        # ── AI 점수 계산 + 라우팅 분류 ──
+        auto_list    = []   # auto_buy
+        confirm_list = []   # confirm (텔레그램 확인)
 
-            # 포지션 상태 포함해서 전송
-            active_names = [c for c in pm.active.keys()]
-            print(f"\n[{get_now()}] 📱 텔레그램 전송 (빈 슬롯 {slots_to_fill}개)...")
-            notify(
-                f"📊 포지션 현황: {len(pm.active)}/{sc.MAX_POSITIONS}개 활성\n"
-                f"빈 슬롯 {slots_to_fill}개 — 종목을 선택해주세요."
-            )
+        for cand in candidates:
+            score_dict, route = _score_and_route(cand)
+            cand["score"]        = score_dict["total"]
+            cand["score_detail"] = score_dict
+            print(f"  {cand['name']:12s} 총점: {score_dict['total']:3d}점 "
+                  f"(기술:{score_dict['tech']} LLM:{score_dict['llm']} DART:{score_dict['dart']}) "
+                  f"→ {route}")
+            if route == "auto_buy":
+                auto_list.append(cand)
+            elif route == "confirm":
+                confirm_list.append(cand)
 
-            selected = send_and_wait(
-                candidates[:5],
-                timeout=sc.TELEGRAM_CONFIRM_TIMEOUT,
-            )
+        # ── 자동 매수 ──
+        for stock in auto_list:
+            if pm.free_slots <= 0 or pm.trade_count >= sc.MAX_TRADES_PER_DAY:
+                break
+            print(f"\n[{get_now()}] 🤖 자동 매수: {stock['name']} ({stock['score']}점)")
+            slot_counter += 1
+            pm.open(stock, slot_counter)
+            if use_telegram:
+                from telegram_bot import notify
+                d = stock["score_detail"]
+                notify(f"🤖 자동 매수\n{stock['name']} — {stock['score']}점\n"
+                       f"기술:{d['tech']} LLM:{d['llm']} DART:{d['dart']}")
+            time.sleep(1)
 
-            if selected is None:
-                print(f"[{get_now()}] ⏰ 응답 없음 — 이번 라운드 패스")
-                continue
-            if selected == "PASS":
-                print(f"[{get_now()}] ⏭ 패스")
-                continue
-
-            target = next((s for s in candidates if s["code"] == selected["code"]), None)
-            if target and pm.free_slots > 0:
-                slot_counter += 1
-                pm.open(target, slot_counter)
-        else:
-            # 자동: 빈 슬롯 수만큼 상위 종목 진입
-            for stock in candidates[:slots_to_fill]:
-                if pm.free_slots <= 0:
-                    break
-                slot_counter += 1
+        # ── 텔레그램 확인 요청 ──
+        if confirm_list and pm.free_slots > 0:
+            if use_telegram:
+                from telegram_bot import send_and_wait, notify
+                notify(f"📊 포지션: {len(pm.active)}/{sc.MAX_POSITIONS}개 활성\n"
+                       f"확인 필요 {len(confirm_list)}개 — 선택해주세요.")
+                selected = send_and_wait(confirm_list[:5], timeout=sc.TELEGRAM_CONFIRM_TIMEOUT)
+                if selected and selected != "PASS":
+                    target = next((s for s in confirm_list if s["code"] == selected["code"]), None)
+                    if target and pm.free_slots > 0:
+                        slot_counter += 1
+                        pm.open(target, slot_counter)
+                elif selected is None:
+                    print(f"[{get_now()}] ⏰ 응답 없음 — 이번 라운드 패스")
+            else:
+                # 텔레그램 없으면 confirm도 자동 진입
+                for stock in confirm_list:
+                    if pm.free_slots <= 0:
+                        break
+                    slot_counter += 1
                 pm.open(stock, slot_counter)
                 time.sleep(1)  # 동시 API 호출 간격
 

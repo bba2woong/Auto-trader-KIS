@@ -11,6 +11,9 @@ __pycache__/
 # 백테스트 로그 (결과 데이터, 개인용)
 backtest/logs/
 
+# AI 점수 캐시 (일별 분석 결과, 개인용)
+scoring/cache/
+
 # Streamlit 캐시
 .streamlit/
 

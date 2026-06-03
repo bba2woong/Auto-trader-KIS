@@ -500,6 +500,9 @@ def run_screening():
                 "돌파여유율": result["돌파여유율"],
                 "패턴":       result["패턴"],
                 "grade":      grade,
+                # scorer.py technical_score() 에서 사용
+                "변동성돌파": result["변동성돌파"],
+                "AD상승":     result["AD상승"],
             })
         elif result["패턴"] == "hanging_man":
             warned.append(stock["name"])
