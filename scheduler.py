@@ -13,6 +13,7 @@ import time
 import threading
 from datetime import datetime
 import strategy_config as sc
+import trading_logger as tlog
 from strategy import (
     calc_target_price,
     calc_quantity,
@@ -83,6 +84,8 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None):
             if bought and quantity > 0:
                 print(f"\n[{get_now()}] {tag} ⏰ 강제 청산")
                 sell_stock(stock_code, quantity)
+                cp = get_current_price(stock_code)["현재가"]
+                tlog.log_sell(stock_code, stock_name, buy_price, cp, quantity, "강제청산", slot_no)
                 result = "강제청산"
             else:
                 result = "강제청산(미체결)"
@@ -117,6 +120,7 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None):
                         peak_price = current_price
                         bought     = True
                         print(f"  {tag} 매수 @ {buy_price:,}원 × {quantity}주")
+                        tlog.log_buy(stock_code, stock_name, buy_price, quantity, budget, slot_no)
                     else:
                         if not breakout_seen:
                             print(f"\n[{get_now()}] {tag} ⚠️ 고점 보류 (여유율 {gap:.2f}%)")
@@ -141,12 +145,14 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None):
                     if signal == "트레일링스탑":
                         print(f"\n[{get_now()}] {tag} 📉 트레일링 스탑 ({rate_str})")
                         sell_stock(stock_code, quantity)
+                        tlog.log_sell(stock_code, stock_name, buy_price, current_price, quantity, "트레일링스탑", slot_no)
                         if on_close:
                             on_close("트레일링스탑", stock_code)
                         return
                     elif signal == "손절":
                         print(f"\n[{get_now()}] {tag} 🔻 손절 ({rate_str})")
                         sell_stock(stock_code, quantity)
+                        tlog.log_sell(stock_code, stock_name, buy_price, current_price, quantity, "손절", slot_no)
                         if on_close:
                             on_close("손절", stock_code)
                         return
@@ -157,6 +163,7 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None):
                     if signal:
                         print(f"\n[{get_now()}] {tag} {'✅ 익절' if signal == '익절' else '🔻 손절'} ({rate_str})")
                         sell_stock(stock_code, quantity)
+                        tlog.log_sell(stock_code, stock_name, buy_price, current_price, quantity, signal, slot_no)
                         if on_close:
                             on_close(signal, stock_code)
                         return
@@ -340,13 +347,16 @@ def run_scheduler():
         _run_ai_cache_if_needed(stock_list, "오후1시")
 
         # ── AI 점수 계산 + 라우팅 분류 ──
-        auto_list    = []   # auto_buy
-        confirm_list = []   # confirm (텔레그램 확인)
+        auto_list    = []
+        confirm_list = []
+        screen_round = getattr(pm, "_screen_round", 0) + 1
+        pm._screen_round = screen_round
 
         for cand in candidates:
             score_dict, route = _score_and_route(cand)
             cand["score"]        = score_dict["total"]
             cand["score_detail"] = score_dict
+            cand["route"]        = route
             print(f"  {cand['name']:12s} 총점: {score_dict['total']:3d}점 "
                   f"(기술:{score_dict['tech']} LLM:{score_dict['llm']} DART:{score_dict['dart']}) "
                   f"→ {route}")
@@ -354,6 +364,9 @@ def run_scheduler():
                 auto_list.append(cand)
             elif route == "confirm":
                 confirm_list.append(cand)
+
+        # 스크리닝 결과 로그
+        tlog.log_screening(screen_round, auto_list + confirm_list)
 
         # ── 자동 매수 ──
         for stock in auto_list:
@@ -373,12 +386,14 @@ def run_scheduler():
         if confirm_list and pm.free_slots > 0:
             if use_telegram:
                 from telegram_bot import send_and_wait, notify
+                tlog.log_confirm_sent(confirm_list[:5])
                 notify(f"📊 포지션: {len(pm.active)}/{sc.MAX_POSITIONS}개 활성\n"
                        f"확인 필요 {len(confirm_list)}개 — 선택해주세요.")
                 selected = send_and_wait(confirm_list[:5], timeout=sc.TELEGRAM_CONFIRM_TIMEOUT)
                 if selected and selected != "PASS":
                     target = next((s for s in confirm_list if s["code"] == selected["code"]), None)
                     if target and pm.free_slots > 0:
+                        tlog.log_confirm_selected(target)
                         slot_counter += 1
                         pm.open(target, slot_counter)
                 elif selected is None:

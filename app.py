@@ -85,7 +85,7 @@ with st.sidebar:
 # ──────────────────────────────────────────
 # 탭
 # ──────────────────────────────────────────
-tab_screen, tab_backtest, tab_config = st.tabs(["🔍 스크리닝", "📊 백테스팅", "📋 파라미터 현황"])
+tab_screen, tab_backtest, tab_log, tab_config = st.tabs(["🔍 스크리닝", "📊 백테스팅", "📋 매매 로그", "⚙️ 파라미터 현황"])
 
 
 # ══════════════════════════════════════════
@@ -434,7 +434,115 @@ with tab_backtest:
 
 
 # ══════════════════════════════════════════
-# 탭 3: 파라미터 현황
+# 탭 3: 매매 로그
+# ══════════════════════════════════════════
+with tab_log:
+    st.subheader("매매 로그")
+    from trading_logger import load_log, list_log_dates
+
+    log_dates = list_log_dates()
+
+    if not log_dates:
+        st.info("저장된 매매 로그가 없습니다. 실투/모의투자를 실행하면 자동으로 기록됩니다.")
+    else:
+        sel_date = st.selectbox("날짜 선택", log_dates,
+                                format_func=lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]} ({d})")
+
+        events = load_log(sel_date)
+        if not events:
+            st.warning("해당 날짜 로그가 비어 있습니다.")
+        else:
+            # ── 요약 지표 ──
+            buys  = [e for e in events if e["event"] == "buy_executed"]
+            sells = [e for e in events if e["event"] == "sell_executed"]
+            total_pnl  = sum(s.get("pnl", 0) for s in sells)
+            wins       = [s for s in sells if s.get("pnl_rate", 0) > 0]
+            win_rate   = len(wins) / len(sells) * 100 if sells else 0
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("매수",   f"{len(buys)}건")
+            m2.metric("매도",   f"{len(sells)}건")
+            m3.metric("실현손익", f"{total_pnl:+,.0f}원")
+            m4.metric("승률",   f"{win_rate:.1f}%")
+
+            st.divider()
+
+            # ── 탭으로 이벤트 구분 ──
+            lt1, lt2, lt3 = st.tabs(["📈 매수/매도", "🔍 스크리닝", "📜 전체 이벤트"])
+
+            with lt1:
+                reason_emoji = {"트레일링스탑":"📉","손절":"🔻","강제청산":"⏰","익절":"✅","종가청산":"🔔"}
+                rows = []
+                for s in sells:
+                    buy_ts = next((b["ts"] for b in buys if b["code"] == s["code"]), "—")
+                    rows.append({
+                        "매수시각": buy_ts,
+                        "매도시각": s["ts"],
+                        "종목":     s["name"],
+                        "코드":     s["code"],
+                        "매수가":   s["buy_price"],
+                        "매도가":   s["sell_price"],
+                        "수량":     s["quantity"],
+                        "손익(원)": s.get("pnl", 0),
+                        "수익률":   f"{s.get('pnl_rate',0):+.2f}%",
+                        "사유":     reason_emoji.get(s["reason"],"") + " " + s["reason"],
+                    })
+                if rows:
+                    df = pd.DataFrame(rows)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("매도 내역 없음")
+
+            with lt2:
+                screens = [e for e in events if e["event"] == "screening_result"]
+                if not screens:
+                    st.info("스크리닝 이벤트 없음")
+                for sc_evt in screens:
+                    with st.expander(f"스크리닝 #{sc_evt.get('round','')}  ({sc_evt.get('ts','')})  — {len(sc_evt.get('candidates',[]))}개 후보"):
+                        cands = sc_evt.get("candidates", [])
+                        if cands:
+                            df = pd.DataFrame([{
+                                "종목":   c["name"],
+                                "코드":   c["code"],
+                                "총점":   c.get("score", 0),
+                                "기술":   c.get("tech", 0),
+                                "LLM":    c.get("llm", 0),
+                                "DART":   c.get("dart", 0),
+                                "라우팅": c.get("route", ""),
+                                "여유율": f"{c.get('gap',0):.2f}%",
+                                "패턴":   c.get("pattern") or "—",
+                                "등급":   c.get("grade") or "—",
+                            } for c in cands])
+                            st.dataframe(df, use_container_width=True, hide_index=True)
+
+            with lt3:
+                event_label = {
+                    "screening_result": "🔍 스크리닝",
+                    "auto_buy":         "🤖 자동매수결정",
+                    "confirm_sent":     "📱 텔레그램전송",
+                    "confirm_selected": "✅ 종목선택",
+                    "buy_executed":     "💰 매수체결",
+                    "sell_executed":    "🏁 매도체결",
+                    "daily_summary":    "📊 일별요약",
+                }
+                rows = []
+                for e in events:
+                    label = event_label.get(e["event"], e["event"])
+                    detail = ""
+                    if e["event"] == "buy_executed":
+                        detail = f"{e['name']} {e['buy_price']:,}원 × {e['quantity']}주"
+                    elif e["event"] == "sell_executed":
+                        detail = f"{e['name']} {e['sell_price']:,}원 ({e.get('pnl_rate',0):+.2f}%) [{e['reason']}]"
+                    elif e["event"] == "auto_buy":
+                        detail = f"{e['name']} {e.get('score',0)}점"
+                    elif e["event"] == "screening_result":
+                        detail = f"{len(e.get('candidates',[]))}개 후보"
+                    rows.append({"시각": e.get("ts",""), "이벤트": label, "내용": detail})
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════
+# 탭 4: 파라미터 현황
 # ══════════════════════════════════════════
 with tab_config:
     st.subheader("현재 전략 파라미터")
