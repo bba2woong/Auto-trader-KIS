@@ -632,22 +632,30 @@ with tab_config:
 
     with col_a:
         st.markdown("#### 매매 전략")
-        st.table(pd.DataFrame([
-            {"파라미터": "K (변동성 계수)",      "값": sc.K},
+        st.dataframe(pd.DataFrame([
+            {"파라미터": "K (변동성 계수)",      "값": str(sc.K)},
             {"파라미터": "투자 비율",             "값": f"{sc.INVEST_RATIO*100:.0f}%"},
             {"파라미터": "하드 손절",             "값": f"{sc.LOSS_RATE*100:.1f}%"},
             {"파라미터": "트레일링 스탑",          "값": f"{sc.TRAILING_STOP_RATE*100:.1f}%"},
             {"파라미터": "트레일 활성화 기준",     "값": f"+{sc.TRAILING_STOP_ACTIVATE_RATE*100:.1f}%"},
-            {"파라미터": "강제 청산",             "값": sc.FORCE_SELL_TIME},
-        ]))
+            {"파라미터": "강제 청산",             "값": str(sc.FORCE_SELL_TIME)},
+        ]).astype(str), use_container_width=True, hide_index=True)
 
     with col_b:
         st.markdown("#### 스크리닝 & 실행")
-        st.table(pd.DataFrame([
-            {"파라미터": "코스피 풀 크기",         "값": sc.KOSPI_POOL_SIZE},
-            {"파라미터": "최대 매매 횟수/일",      "값": sc.MAX_TRADES_PER_DAY},
+        st.dataframe(pd.DataFrame([
+            {"파라미터": "코스피 풀 크기",         "값": str(sc.KOSPI_POOL_SIZE)},
+            {"파라미터": "최대 포지션",            "값": str(sc.MAX_POSITIONS)},
+            {"파라미터": "최대 매매 횟수/일",      "값": str(sc.MAX_TRADES_PER_DAY)},
             {"파라미터": "돌파여유율 상한",         "값": f"{sc.MAX_BREAKOUT_GAP}%"},
-            {"파라미터": "재스크리닝 대기",         "값": f"{sc.RESCREEN_WAIT}초"},
+            {"파라미터": "재스크리닝 주기",         "값": f"{sc.SCREENING_INTERVAL}분"},
             {"파라미터": "쿨다운",                 "값": f"{sc.SAME_STOCK_COOLDOWN}초"},
-            {"파라미터": "시세 체크 주기",          "값": f"{sc.CHECK_INTERVAL}초"},
-        ]))
+        ]).astype(str), use_container_width=True, hide_index=True)
+
+        st.markdown("#### AI 점수")
+        st.dataframe(pd.DataFrame([
+            {"파라미터": "AI 점수 사용",    "값": str(sc.USE_AI_SCORING)},
+            {"파라미터": "DART 점수 사용",  "값": str(sc.USE_DART_SCORING)},
+            {"파라미터": "자동매수 기준",    "값": f"{sc.AUTO_BUY_SCORE}점 이상"},
+            {"파라미터": "확인 요청 기준",   "값": f"{sc.CONFIRM_SCORE_MIN}점 이상"},
+        ]).astype(str), use_container_width=True, hide_index=True)
