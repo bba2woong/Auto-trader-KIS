@@ -1,5 +1,23 @@
+# 환경변수 / 인증
 .env
+token_cache.json
+
+# Python
 venv/
 __pycache__/
 *.pyc
-token_cache.json
+*.pyo
+
+# 백테스트 로그 (결과 데이터, 개인용)
+backtest/logs/
+
+# Streamlit 캐시
+.streamlit/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store

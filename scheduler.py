@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime
 import strategy_config as sc
@@ -7,6 +8,7 @@ from strategy import (
     get_current_price,
     is_force_sell_time,
     check_profit_loss,
+    update_trailing_stop,
 )
 from order import buy_stock, sell_stock, get_holding_quantity
 from screener import run_screening
@@ -34,9 +36,10 @@ def run_single_stock(stock_code, stock_name, trade_no):
     print(f"\n[{get_now()}] 목표가 계산 중...")
     target_price = calc_target_price(stock_code)
 
-    bought    = False  # 매수 여부
-    buy_price = 0      # 매수가
-    quantity  = 0      # 보유 수량
+    bought       = False  # 매수 여부
+    buy_price    = 0      # 매수가
+    quantity     = 0      # 보유 수량
+    peak_price   = 0      # 매수 후 최고가 (트레일링 스탑용)
     breakout_seen = False  # 돌파 후 고점 보류 상태인지 (재진입 판단용)
 
     print(f"\n[{get_now()}] 매수 대기 중...")
@@ -84,8 +87,9 @@ def run_single_stock(stock_code, stock_name, trade_no):
                             print(f"  ⚠️ 매수 가능 수량 없음 — 이 종목 건너뜀")
                             return "수량부족"
                         buy_stock(stock_code, quantity)
-                        buy_price = current_price
-                        bought    = True
+                        buy_price  = current_price
+                        peak_price = current_price
+                        bought     = True
                         print(f"  매수가: {buy_price:,}원 | 수량: {quantity}주")
                     else:
                         # 여유율이 상한선 초과 = 이미 고점, 보류하고 계속 감시
@@ -111,14 +115,39 @@ def run_single_stock(stock_code, stock_name, trade_no):
                         print(f"[{get_now()}] 대기 중 | 현재가: {current_price:,}원 | 목표가: {target_price:,}원", end="\r")
             else:
                 # 매도 조건 체크
-                signal, rate = check_profit_loss(buy_price, current_price)
-                rate_str     = f"{rate*100:+.2f}%"
-                print(f"[{get_now()}] 보유 중 | 현재가: {current_price:,}원 | 수익률: {rate_str}", end="\r")
-
-                if signal:
-                    print(f"\n[{get_now()}] {'✅ 익절' if signal == '익절' else '🔻 손절'} 신호! ({rate_str})")
-                    sell_stock(stock_code, quantity)
-                    return signal
+                if sc.USE_TRAILING_STOP:
+                    signal, rate, peak_price, stop_price, activated = update_trailing_stop(
+                        buy_price, current_price, peak_price
+                    )
+                    rate_str = f"{rate*100:+.2f}%"
+                    if activated and stop_price:
+                        print(
+                            f"[{get_now()}] 보유 중 | 현재가: {current_price:,}원 | "
+                            f"수익률: {rate_str} | 고점: {peak_price:,}원 | 스탑: {stop_price:,.0f}원",
+                            end="\r"
+                        )
+                    else:
+                        print(
+                            f"[{get_now()}] 보유 중 | 현재가: {current_price:,}원 | "
+                            f"수익률: {rate_str} | 트레일 대기 중",
+                            end="\r"
+                        )
+                    if signal == "트레일링스탑":
+                        print(f"\n[{get_now()}] 📉 트레일링 스탑 발동! 고점 {peak_price:,}원 대비 하락 ({rate_str})")
+                        sell_stock(stock_code, quantity)
+                        return signal
+                    elif signal == "손절":
+                        print(f"\n[{get_now()}] 🔻 하드 손절 발동! ({rate_str})")
+                        sell_stock(stock_code, quantity)
+                        return signal
+                else:
+                    signal, rate = check_profit_loss(buy_price, current_price)
+                    rate_str     = f"{rate*100:+.2f}%"
+                    print(f"[{get_now()}] 보유 중 | 현재가: {current_price:,}원 | 수익률: {rate_str}", end="\r")
+                    if signal:
+                        print(f"\n[{get_now()}] {'✅ 익절' if signal == '익절' else '🔻 손절'} 신호! ({rate_str})")
+                        sell_stock(stock_code, quantity)
+                        return signal
 
         except Exception as e:
             print(f"\n[{get_now()}] ⚠️ 오류 발생: {e} — 재시도 중...")
@@ -126,56 +155,136 @@ def run_single_stock(stock_code, stock_name, trade_no):
         time.sleep(sc.CHECK_INTERVAL)
 
 
+SCAN_CLOSE_TIME   = "100000"   # 장 시작 1시간 후 — 이 시각이 지나면 수집 종료
+SCAN_TARGET_COUNT = 5          # 이 수 이상 모이면 즉시 수집 종료
+
+
+def _telegram_enabled():
+    return bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
+
+
+def _collect_candidates(cooldown_map):
+    """
+    조건 충족 종목 수집 루프.
+    종료 조건 (OR):
+      1) 누적 후보 5개 이상
+      2) 장 시작 후 1시간 경과 (10:00)
+    반환: 쿨다운 제외된 후보 리스트 (돌파여유율 오름차순)
+    """
+    collected = {}   # code → 종목 dict (중복 방지, 여유율 낮은 것 유지)
+    round_no  = 0
+
+    while True:
+        now_str = datetime.now().strftime("%H%M%S")
+
+        # 종료 조건 2: 10:00 이후
+        if now_str >= SCAN_CLOSE_TIME:
+            reason = f"10:00 도달"
+            break
+
+        # 강제 청산 시간 초과 방어
+        if is_force_sell_time():
+            reason = "강제 청산 시간"
+            break
+
+        round_no += 1
+        print(f"\n[{get_now()}] 스크리닝 #{round_no} — 현재 후보 {len(collected)}개")
+        screened = run_screening()
+
+        now_ts = time.time()
+        for s in screened:
+            code = s["code"]
+
+            # 쿨다운 제외
+            last_sold = cooldown_map.get(code)
+            if last_sold and (now_ts - last_sold) < sc.SAME_STOCK_COOLDOWN:
+                continue
+
+            # 더 낮은 여유율로 갱신
+            if code not in collected or s["돌파여유율"] < collected[code]["돌파여유율"]:
+                collected[code] = s
+
+        # 종료 조건 1: 5개 이상 수집
+        if len(collected) >= SCAN_TARGET_COUNT:
+            reason = f"후보 {len(collected)}개 달성"
+            break
+
+        # 아직 부족 → 대기 후 재스크리닝
+        remaining = (
+            datetime.strptime(SCAN_CLOSE_TIME, "%H%M%S").replace(
+                year=datetime.now().year,
+                month=datetime.now().month,
+                day=datetime.now().day
+            ) - datetime.now()
+        ).seconds
+        print(f"[{get_now()}] 후보 {len(collected)}/{SCAN_TARGET_COUNT}개 — "
+              f"10:00까지 {remaining//60}분 남음. {sc.RESCREEN_WAIT}초 후 재스크리닝")
+        time.sleep(sc.RESCREEN_WAIT)
+
+    result = sorted(collected.values(), key=lambda x: x["돌파여유율"])
+    print(f"\n[{get_now()}] 수집 종료 ({reason}) — 최종 후보 {len(result)}개")
+    return result
+
+
 def run_scheduler():
-    """전체 스케줄러 메인 루프 (청산 후 재스크리닝 방식)"""
+    """전체 스케줄러 메인 루프"""
     sc.print_config()
+
+    use_telegram = _telegram_enabled()
+    if use_telegram:
+        print(f"  📱 텔레그램 연동: ON — 스크리닝 결과를 휴대폰으로 전송합니다.")
+    else:
+        print(f"  📵 텔레그램 연동: OFF — 자동으로 1순위 종목 선택합니다.")
+    print(f"  수집 조건     : 후보 {SCAN_TARGET_COUNT}개 OR 10:00 도달 시 전송")
 
     # 장 시작 대기
     wait_until_market_open()
 
-    trade_count   = 0
-    daily_log     = []
-    cooldown_map  = {}  # {종목코드: 마지막 청산 시각} — 쿨다운 관리
+    trade_count  = 0
+    daily_log    = []
+    cooldown_map = {}
 
     while True:
-        # 종료 조건 1: 최대 매매 횟수 도달
         if trade_count >= sc.MAX_TRADES_PER_DAY:
-            print(f"\n[{get_now()}] 오늘 최대 매매 횟수({sc.MAX_TRADES_PER_DAY}회) 도달 — 종료")
+            print(f"\n[{get_now()}] 최대 매매 횟수({sc.MAX_TRADES_PER_DAY}회) 도달 — 종료")
             break
-
-        # 종료 조건 2: 강제 청산 시간 이후 (신규 진입 안 함)
         if is_force_sell_time():
             print(f"\n[{get_now()}] 강제 청산 시간 이후 — 신규 진입 없이 종료")
             break
 
-        # 재스크리닝
-        print(f"\n[{get_now()}] 종목 스크리닝 중...")
-        screened = run_screening()
+        # ── 후보 수집 (5개 OR 10:00) ──
+        available = _collect_candidates(cooldown_map)
 
-        # 쿨다운 중인 종목 제외
-        now_ts = time.time()
-        available = []
-        for s in screened:
-            last_sold = cooldown_map.get(s["code"])
-            if last_sold and (now_ts - last_sold) < sc.SAME_STOCK_COOLDOWN:
-                remain = int(sc.SAME_STOCK_COOLDOWN - (now_ts - last_sold))
-                print(f"  ⏳ {s['name']} 쿨다운 중 (남은 {remain}초) — 이번엔 제외")
-                continue
-            available.append(s)
-
-        # 후보가 없으면 잠시 대기 후 다시 스크리닝
         if not available:
-            if is_force_sell_time():
-                print(f"\n[{get_now()}] 강제 청산 시간 도달 — 종료")
-                break
-            print(f"[{get_now()}] 조건 충족 종목 없음 — {sc.RESCREEN_WAIT}초 후 재스크리닝")
-            time.sleep(sc.RESCREEN_WAIT)
-            continue
+            print(f"[{get_now()}] 조건 충족 종목 없음 — 오늘 매매 종료")
+            break
 
-        # 1순위 종목 매매
-        target = available[0]
+        # ── 종목 선택 ──
+        if use_telegram:
+            from telegram_bot import send_and_wait, notify
+            top5 = available[:5]
+            print(f"\n[{get_now()}] 📱 텔레그램으로 결과 전송 중... ({len(top5)}개)")
+            selected = send_and_wait(top5, timeout=300)
+
+            if selected is None:
+                print(f"[{get_now()}] ⏰ 5분 타임아웃 — 오늘 매매 없이 종료")
+                break
+            if selected == "PASS":
+                print(f"[{get_now()}] ⏭ 패스 선택 — 오늘 매매 없이 종료")
+                break
+
+            target = next((s for s in available if s["code"] == selected["code"]), selected)
+        else:
+            target = available[0]
+
         trade_count += 1
         result = run_single_stock(target["code"], target["name"], trade_count)
+
+        # 매매 결과 텔레그램 알림
+        if use_telegram:
+            from telegram_bot import notify
+            emoji = "✅" if result in ("익절", "트레일링스탑") else "🔻" if result == "손절" else "⏰"
+            notify(f"{emoji} *{target['name']}* 매매 완료\n결과: {result}")
 
         # 청산 시각 기록 (쿨다운용)
         cooldown_map[target["code"]] = time.time()

@@ -113,7 +113,7 @@ def is_force_sell_time():
     return now >= sc.FORCE_SELL_TIME
 
 def check_profit_loss(buy_price, current_price):
-    """익절/손절 조건 체크"""
+    """익절/손절 조건 체크 (고정 방식)"""
     rate = (current_price - buy_price) / buy_price
 
     if rate >= sc.PROFIT_RATE:
@@ -122,3 +122,35 @@ def check_profit_loss(buy_price, current_price):
         return "손절", rate
     else:
         return None, rate
+
+
+def update_trailing_stop(buy_price, current_price, peak_price):
+    """
+    트레일링 스탑 상태 업데이트.
+    반환: (signal, rate, new_peak_price, stop_price, activated)
+      signal      : "트레일링스탑" | "손절" | None
+      rate        : 매수가 대비 현재 수익률
+      new_peak    : 갱신된 고점가
+      stop_price  : 현재 트레일링 스탑 가격 (활성화 전이면 None)
+      activated   : 트레일링 스탑 활성 여부
+    """
+    rate     = (current_price - buy_price) / buy_price
+    new_peak = max(peak_price, current_price)
+
+    # 하드 손절 (항상 작동)
+    if rate <= -sc.LOSS_RATE:
+        return "손절", rate, new_peak, None, False
+
+    # 트레일링 스탑 활성화 여부 판단
+    peak_rate  = (new_peak - buy_price) / buy_price
+    activated  = peak_rate >= sc.TRAILING_STOP_ACTIVATE_RATE
+
+    if not activated:
+        return None, rate, new_peak, None, False
+
+    stop_price = new_peak * (1 - sc.TRAILING_STOP_RATE)
+
+    if current_price <= stop_price:
+        return "트레일링스탑", rate, new_peak, stop_price, True
+
+    return None, rate, new_peak, stop_price, True
