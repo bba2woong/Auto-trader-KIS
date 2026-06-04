@@ -168,24 +168,57 @@ def run_intraday_backtest(minute_data, daily_data, stock_list, date,
 # 내부 헬퍼
 # ──────────────────────────────────────────
 
+def _agg_hour_candle(bars, hour: int):
+    """
+    분봉 리스트에서 특정 시간(hour)의 봉들을 집계해 OHLCV 반환.
+    bars는 time-ascending (예: "090000" ~ "145900").
+    """
+    ph_str  = f"{hour:02d}"
+    ph_bars = [b for b in bars if b["time"].startswith(ph_str)]
+    if not ph_bars:
+        return None
+    return {
+        "open":   ph_bars[0]["open"],
+        "high":   max(b["high"]   for b in ph_bars),
+        "low":    min(b["low"]    for b in ph_bars),
+        "close":  ph_bars[-1]["close"],
+        "volume": sum(b["volume"] for b in ph_bars),
+    }
+
+
+def _is_strong_bull(candle) -> bool:
+    """강한 양봉 조건 (screener.is_strong_bull_candle과 동일 로직)"""
+    if candle is None:
+        return False
+    o, h, l, c = candle["open"], candle["high"], candle["low"], candle["close"]
+    total_range = h - l
+    if total_range == 0 or c <= o:
+        return False
+    body       = c - o
+    upper_wick = h - c
+    return (body / total_range >= 0.7) and (upper_wick <= body * 0.3)
+
+
 def _build_candidates(minute_data, daily_data, stock_list, date, params):
     """
-    목표가 + AD상승 기준으로 후보 종목 목록 생성.
+    목표가 + AD상승 + (선택) 60분봉 강봉 감지 기준으로 후보 종목 목록 생성.
     오늘 시가는 분봉 첫 번째 봉의 open 사용.
-    정렬: 목표가 낮은 것 우선 (스크리닝과 동일 정책).
+    정렬: 목표가 낮은 순.
     """
-    result = []
+    result      = []
+    strong_cnt  = 0   # 디버그: 강봉 감지 종목 수
+
     for stock in stock_list:
         code = stock["code"]
         bars = minute_data.get(code)
         if not bars:
             continue
 
-        # 오늘 시가
+        # 오늘 시가 (첫 분봉)
         today_open = bars[0]["open"]
 
         # 전일 데이터
-        dmap = daily_data.get(code, {})
+        dmap  = daily_data.get(code, {})
         dates = sorted(dmap.keys())
         if date not in dates:
             continue
@@ -204,14 +237,26 @@ def _build_candidates(minute_data, daily_data, stock_list, date, params):
         if not _ad_rising(window):
             continue
 
+        # 60분봉 강봉 감지 — 09:00~09:59 봉 집계 (SCAN_START 직전 시간)
+        hour_candle  = _agg_hour_candle(bars, 9)   # 09시봉
+        strong_bull  = _is_strong_bull(hour_candle)
+        if strong_bull:
+            strong_cnt += 1
+
         result.append({
             **stock,
-            "target":    int(target),
-            "today_open": today_open,
+            "target":      int(target),
+            "today_open":  today_open,
+            "시간봉패턴":  "strong_bull" if strong_bull else None,
         })
 
-    # 목표가 낮은 순 (더 일찍 돌파 가능한 것 우선)
+    # 목표가 낮은 순 정렬
     result.sort(key=lambda x: x["target"])
+
+    # 디버그 출력
+    print(f"  [backtest] 후보: {len(result)}개 "
+          f"(강봉 {strong_cnt}개 / AD통과 {len(result)}개 "
+          f"/ 전체 분봉종목 {sum(1 for s in stock_list if minute_data.get(s['code']))}개)")
     return result
 
 
@@ -317,7 +362,13 @@ def run_log_intraday_backtest(minute_data, entry_list, budget_per_pos, params, d
             timeline.append(f"{entry_time} {name} — 수량 부족, 스킵")
             continue
 
-        timeline.append(f"{entry_bar['time']} 매수 {name} @ {buy_price:,}원 × {quantity}주")
+        # 60분봉 강봉 감지 (진입 시각 기준 직전 시간봉)
+        prev_hour   = int(entry_time[:2]) - 1
+        hour_candle = _agg_hour_candle(bars, prev_hour) if prev_hour >= 9 else None
+        strong_bull = _is_strong_bull(hour_candle)
+        bull_tag    = " 🔥강봉" if strong_bull else ""
+
+        timeline.append(f"{entry_bar['time']} 매수 {name}{bull_tag} @ {buy_price:,}원 × {quantity}주")
 
         # 진입 이후 분봉 순회 → 청산 조건 체크
         peak        = buy_price
