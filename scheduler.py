@@ -74,6 +74,8 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None):
     quantity      = 0
     peak_price    = 0
     breakout_seen = False
+    error_count   = 0          # 연속 에러 횟수
+    MAX_ERRORS    = 10         # 이 횟수 초과 시 강제 청산
 
     print(f"\n[{get_now()}] {tag} 매수 대기 중...")
 
@@ -83,8 +85,11 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None):
         if is_force_sell_time():
             if bought and quantity > 0:
                 print(f"\n[{get_now()}] {tag} ⏰ 강제 청산")
-                sell_stock(stock_code, quantity)
-                cp = get_current_price(stock_code)["현재가"]
+                try:
+                    sell_stock(stock_code, quantity)
+                    cp = get_current_price(stock_code).get("현재가", buy_price)
+                except Exception:
+                    cp = buy_price  # 조회 실패 시 매수가로 대체
                 tlog.log_sell(stock_code, stock_name, buy_price, cp, quantity, "강제청산", slot_no)
                 result = "강제청산"
             else:
@@ -95,13 +100,17 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None):
 
         if now_str > sc.MARKET_CLOSE:
             if bought and quantity > 0:
-                sell_stock(stock_code, quantity)
+                try:
+                    sell_stock(stock_code, quantity)
+                except Exception as e:
+                    print(f"\n{tag} 장종료 매도 실패: {e}")
             if on_close:
                 on_close("장종료", stock_code)
             return
 
         try:
             current_price = get_current_price(stock_code)["현재가"]
+            error_count = 0  # 성공 시 에러 카운터 리셋
 
             if not bought:
                 if current_price >= target_price:
@@ -169,7 +178,22 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None):
                         return
 
         except Exception as e:
-            print(f"\n[{get_now()}] {tag} ⚠️ {e}")
+            error_count += 1
+            print(f"\n[{get_now()}] {tag} ⚠️ API 오류 ({error_count}/{MAX_ERRORS}): {e}")
+
+            # 연속 에러 한도 초과 → 보유 중이면 강제 청산 후 종료
+            if error_count >= MAX_ERRORS:
+                print(f"\n[{get_now()}] {tag} 🚨 연속 오류 {MAX_ERRORS}회 — 강제 청산")
+                if bought and quantity > 0:
+                    try:
+                        sell_stock(stock_code, quantity)
+                        tlog.log_sell(stock_code, stock_name, buy_price, buy_price,
+                                      quantity, "오류청산", slot_no)
+                    except Exception as sell_err:
+                        print(f"  ⚠️ 오류청산 매도 실패: {sell_err}")
+                if on_close:
+                    on_close("오류청산", stock_code)
+                return
 
         time.sleep(sc.CHECK_INTERVAL)
 
