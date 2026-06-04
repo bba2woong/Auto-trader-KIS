@@ -277,6 +277,113 @@ def _ad_rising(window):
     return ad_line[-1] > ad_line[-2]
 
 
+def run_log_intraday_backtest(minute_data, entry_list, budget_per_pos, params, date=""):
+    """
+    매매 로그 기반 단타 백테스트
+    스크리닝 시각의 분봉 종가에 즉시 매수 → 파라미터 기준 청산
+
+    entry_list : [{"code","name","entry_time"(HHMMSS)}, ...]
+    budget_per_pos : 포지션당 예산 (초기자금 ÷ 포지션수)
+    params     : K는 무관 (진입 이미 확정), LOSS_RATE / TRAILING_STOP_RATE 적용
+    """
+    initial_capital = budget_per_pos * len(entry_list)
+    capital         = float(initial_capital)
+    equity_curve    = [capital]
+    trades          = []
+    timeline        = []
+
+    for entry in entry_list:
+        code       = entry["code"]
+        name       = entry["name"]
+        entry_time = entry["entry_time"]   # HHMMSS
+        bars       = minute_data.get(code, [])
+        if not bars:
+            timeline.append(f"{entry_time} {name} — 분봉 없음, 스킵")
+            continue
+
+        # 스크리닝 시각 이후 첫 번째 분봉 찾기 (정각 또는 그 직후)
+        entry_bar = None
+        for b in bars:
+            if b["time"] >= entry_time:
+                entry_bar = b
+                break
+        if entry_bar is None:
+            timeline.append(f"{entry_time} {name} — 진입 시각 이후 분봉 없음, 스킵")
+            continue
+
+        buy_price  = entry_bar["close"]
+        quantity   = int(budget_per_pos / buy_price)
+        if quantity < 1:
+            timeline.append(f"{entry_time} {name} — 수량 부족, 스킵")
+            continue
+
+        timeline.append(f"{entry_bar['time']} 매수 {name} @ {buy_price:,}원 × {quantity}주")
+
+        # 진입 이후 분봉 순회 → 청산 조건 체크
+        peak        = buy_price
+        trail_active = False
+        sell_price  = None
+        sell_time   = None
+        reason      = None
+
+        for bar in bars:
+            if bar["time"] < entry_bar["time"]:
+                continue
+
+            # 고점 갱신
+            if bar["high"] > peak:
+                peak = bar["high"]
+
+            # 트레일링 활성화
+            if not trail_active:
+                if (peak - buy_price) / buy_price >= params["TRAILING_STOP_ACTIVATE_RATE"]:
+                    trail_active = True
+
+            exit_r, exit_p = _check_exit(bar, buy_price, peak, trail_active, params)
+            if exit_r:
+                sell_price = exit_p
+                sell_time  = bar["time"]
+                reason     = exit_r
+                break
+
+        # 강제 청산 (장 종료)
+        if sell_price is None:
+            last       = bars[-1]
+            sell_price = last["close"]
+            sell_time  = last["time"]
+            reason     = "강제청산"
+
+        pnl      = (sell_price - buy_price) * quantity
+        pnl_rate = (sell_price - buy_price) / buy_price
+        capital += pnl
+        equity_curve.append(capital)
+        timeline.append(
+            f"{sell_time} {reason} {name} @ {sell_price:,}원  ({pnl_rate*100:+.2f}%)"
+        )
+        trades.append({
+            "code":       code,
+            "name":       name,
+            "date":       date,
+            "entry_time": entry_bar["time"],
+            "exit_time":  sell_time,
+            "buy_price":  buy_price,
+            "sell_price": sell_price,
+            "quantity":   quantity,
+            "pnl":        pnl,
+            "pnl_rate":   pnl_rate,
+            "reason":     reason,
+        })
+
+    return {
+        "trades":          trades,
+        "equity_curve":    equity_curve,
+        "final_capital":   capital,
+        "initial_capital": initial_capital,
+        "timeline":        timeline,
+        "date":            date,
+    }
+
+
 def _empty_result(initial_capital):
     return {
         "trades":          [],

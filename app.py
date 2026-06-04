@@ -383,13 +383,18 @@ with tab_backtest:
         screen_events = [e for e in log_events if e["event"] == "screening_result"]
 
         if screen_events:
-            # 스크리닝 후보 종목 추출 (중복 제거, AI점수 높은 것 유지)
+            # 스크리닝 후보 종목 추출
+            # cand_map: {code: {**candidate_info, "entry_time": HHMMSS}}
+            # 같은 종목이 여러 라운드에 나오면 가장 처음 나온 시각(= 가장 이른 진입 기회)을 사용
             cand_map = {}
             for evt in screen_events:
+                ts_raw     = evt.get("ts", "093000")
+                entry_time = ts_raw.replace(":", "")[:6]   # "09:35:22" → "093522"
                 for c in evt.get("candidates", []):
                     code = c["code"]
-                    if code not in cand_map or c.get("score", 0) > cand_map[code].get("score", 0):
-                        cand_map[code] = c
+                    if code not in cand_map:
+                        cand_map[code] = {**c, "entry_time": entry_time}
+                    # 이미 있으면 entry_time 유지 (첫 등장 시각 사용)
 
             st.markdown(f"##### 📋 당일 스크리닝 후보 종목 ({date_str}, {len(cand_map)}개)")
 
@@ -424,9 +429,13 @@ with tab_backtest:
             budget_per_pos = initial_capital / n_positions
             st.caption(f"포지션당 예산: **{budget_per_pos:,.0f}원**  =  초기자금 {initial_capital:,}원 ÷ {n_positions}개")
 
-            # 선택 종목 리스트 구성
-            stock_list_for_bt = [{"code": c, "name": cand_map[c]["name"]} for c in selected_codes]
-            pool_option = "log_based"   # 로그 기반 모드 플래그
+            # 선택 종목 리스트 구성 (entry_time 포함)
+            stock_list_for_bt = [
+                {"code": c, "name": cand_map[c]["name"],
+                 "entry_time": cand_map[c].get("entry_time", "093000")}
+                for c in selected_codes
+            ]
+            pool_option = "log_based"
 
         else:
             st.info(f"📋 {date_str} 매매 로그 없음 — 표준 종목 풀로 진행합니다.")
@@ -544,11 +553,37 @@ with tab_backtest:
                     actual_date  = st.session_state["bt_actual_date"]
                     prog_text.caption("✅ 캐시 데이터 사용")
 
-                from backtest.engine_intraday import run_intraday_backtest
+                from backtest.engine_intraday import run_intraday_backtest, run_log_intraday_backtest
+                is_log_mode = (pool_option == "log_based")
+
+                def _make_params(kv, lv, tv):
+                    return {
+                        "K": kv, "LOSS_RATE": lv/100,
+                        "TRAILING_STOP_RATE": tv/100,
+                        "TRAILING_STOP_ACTIVATE_RATE": sc.TRAILING_STOP_ACTIVATE_RATE,
+                        "USE_TRAILING_STOP": sc.USE_TRAILING_STOP,
+                        "PROFIT_RATE": sc.PROFIT_RATE,
+                        "INVEST_RATIO": sc.INVEST_RATIO,
+                        "MAX_TRADES_PER_DAY": sc.MAX_TRADES_PER_DAY,
+                        "budget_per_position": budget_per_pos,
+                    }
+
+                def _run_one(params):
+                    if is_log_mode:
+                        # 로그 기반: 스크리닝 시각에 즉시 매수
+                        return run_log_intraday_backtest(
+                            minute_data, stock_list, budget_per_pos, params, actual_date
+                        )
+                    else:
+                        return run_intraday_backtest(
+                            minute_data, daily_data, stock_list, actual_date,
+                            initial_capital, params=params
+                        )
 
                 if is_grid:
-                    # 파라미터 그리드 탐색
-                    k_vals  = _range_values(rng_k,  sv_k,  rmin_k,  rmax_k,  rstep_k)
+                    # 로그 모드: K는 진입에 영향 없으므로 K 그리드 제거
+                    k_vals  = _range_values(rng_k,  sv_k,  rmin_k,  rmax_k,  rstep_k) if not is_log_mode \
+                              else [sv_k]
                     ls_vals = _range_values(rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls)
                     tr_vals = _range_values(rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr)
                     total_combos = len(k_vals) * len(ls_vals) * len(tr_vals)
@@ -558,24 +593,16 @@ with tab_backtest:
                             for tv in tr_vals:
                                 combo_i += 1
                                 prog_bar.progress(combo_i / total_combos)
-                                prog_text.caption(f"⚙️ 조합 계산 중 ({combo_i}/{total_combos})  K={kv} 손절={lv}% 트레일={tv}%")
-                                # sc 전역 수정 없이 params 딕셔너리로 전달
-                                grid_params = {
-                                    "K": kv, "LOSS_RATE": lv/100,
-                                    "TRAILING_STOP_RATE": tv/100,
-                                    "TRAILING_STOP_ACTIVATE_RATE": sc.TRAILING_STOP_ACTIVATE_RATE,
-                                    "USE_TRAILING_STOP": sc.USE_TRAILING_STOP,
-                                    "PROFIT_RATE": sc.PROFIT_RATE,
-                                    "INVEST_RATIO": sc.INVEST_RATIO,
-                                    "MAX_TRADES_PER_DAY": sc.MAX_TRADES_PER_DAY,
-                                    "budget_per_position": budget_per_pos,
-                                }
-                                r = run_intraday_backtest(minute_data, daily_data, stock_list,
-                                                          actual_date, initial_capital, params=grid_params)
+                                label_k = f"K={kv} " if not is_log_mode else ""
+                                prog_text.caption(f"⚙️ ({combo_i}/{total_combos})  {label_k}손절={lv}% 트레일={tv}%")
+                                r = _run_one(_make_params(kv, lv, tv))
                                 ret, n_tr, wr, mdd = _calc_summary(r)
-                                grid_rows.append({"K":kv,"손절(%)":lv,"트레일(%)":tv,
-                                                  "수익률(%)":round(ret,2),"거래수":n_tr,
-                                                  "승률(%)":round(wr,1),"MDD(%)":round(mdd,2)})
+                                row = {"손절(%)":lv,"트레일(%)":tv,
+                                       "수익률(%)":round(ret,2),"거래수":n_tr,
+                                       "승률(%)":round(wr,1),"MDD(%)":round(mdd,2)}
+                                if not is_log_mode:
+                                    row = {"K": kv, **row}
+                                grid_rows.append(row)
                                 _save_log({"timestamp":datetime.now().isoformat(),"type":"intraday_grid",
                                            "date":actual_date,"K":kv,"loss_pct":lv,"trail_pct":tv,
                                            "initial_capital":initial_capital,"return_pct":round(ret,2),
@@ -585,18 +612,7 @@ with tab_backtest:
                     st.session_state.pop("bt_result", None)
                 else:
                     prog_text.caption("⚙️ 계산 중...")
-                    single_params = {
-                        "K": sv_k, "LOSS_RATE": sv_ls/100,
-                        "TRAILING_STOP_RATE": sv_tr/100,
-                        "TRAILING_STOP_ACTIVATE_RATE": sc.TRAILING_STOP_ACTIVATE_RATE,
-                        "USE_TRAILING_STOP": sc.USE_TRAILING_STOP,
-                        "PROFIT_RATE": sc.PROFIT_RATE,
-                        "INVEST_RATIO": sc.INVEST_RATIO,
-                        "MAX_TRADES_PER_DAY": sc.MAX_TRADES_PER_DAY,
-                        "budget_per_position": budget_per_pos,
-                    }
-                    result = run_intraday_backtest(minute_data, daily_data, stock_list,
-                                                   actual_date, initial_capital, params=single_params)
+                    result = _run_one(_make_params(sv_k, sv_ls, sv_tr))
                     prog_bar.progress(1.0); prog_text.caption("✅ 완료!")
                     st.session_state["bt_result"] = result
                     st.session_state.pop("bt_grid", None)
