@@ -328,15 +328,23 @@ def _show_single_result(result):
 def _show_grid_result(grid_rows):
     """파라미터 범위 그리드 결과 테이블"""
     st.subheader(f"파라미터 최적화 결과  ({len(grid_rows)}개 조합)")
-    df = pd.DataFrame(grid_rows).sort_values("수익률(%)", ascending=False)
+    df       = pd.DataFrame(grid_rows)
+    sort_col = "전체수익률(%)" if "전체수익률(%)" in df.columns else "수익률(%)"
+    df       = df.sort_values(sort_col, ascending=False)
+
+    # 종목별 수익률 컬럼 (고정 컬럼이 아닌 것 = 종목명)
+    fixed = {"K","손절(%)","트레일(%)","전체수익률(%)","수익률(%)","거래수","승률(%)","MDD(%)"}
+    stock_cols = [c for c in df.columns if c not in fixed]
+    grad_cols  = [sort_col] + stock_cols
+
     st.dataframe(
-        df.style.background_gradient(subset=["수익률(%)"], cmap="RdYlGn"),
+        df.style.background_gradient(subset=grad_cols, cmap="RdYlGn"),
         use_container_width=True, hide_index=True,
     )
-    best = df.iloc[0]
+    best  = df.iloc[0]
     k_str = f"K: {best['K']} | " if 'K' in best.index else ""
     st.success(f"✅ 최적 조합 — {k_str}손절: {best['손절(%)']}% | "
-               f"트레일링: {best['트레일(%)']}% → 수익률 {best['수익률(%)']:+.2f}%")
+               f"트레일링: {best['트레일(%)']}% → 전체수익률 {best[sort_col]:+.2f}%")
 
 
 with tab_backtest:
@@ -466,10 +474,12 @@ with tab_backtest:
                                               key=f"sv_{label}", format=f"%{fmt}")
                 return use_range, sv, None, None, None
 
-        rng_k,  sv_k,  rmin_k,  rmax_k,  rstep_k  = _param_row("K",        sc.K,                   0.3, 0.7, 0.05, 0.3, 0.7, 0.1,  ".2f")
-        rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls  = _param_row("손절(%)",  sc.LOSS_RATE*100,        0.5, 5.0, 0.1,  1.0, 4.0, 0.5,  ".1f")
+        # 단타 로그 기반: K 제거 (진입가 이미 확정), 손절/트레일만
+        sv_k   = sc.K   # K는 고정값으로만 사용 (그리드 불필요)
+        rng_k  = False; rmin_k = rmax_k = rstep_k = None
+        rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls  = _param_row("손절(%)",  sc.LOSS_RATE*100,          0.5, 5.0, 0.1, 1.0, 4.0, 0.5, ".1f")
         rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr  = _param_row("트레일(%)", sc.TRAILING_STOP_RATE*100, 0.5, 5.0, 0.1, 1.0, 4.0, 0.5, ".1f")
-        is_grid = rng_k or rng_ls or rng_tr
+        is_grid = rng_ls or rng_tr
     else:
         is_grid = False
 
@@ -598,11 +608,15 @@ with tab_backtest:
                                 prog_text.caption(f"⚙️ ({combo_i}/{total_combos})  {label_k}손절={lv}% 트레일={tv}%")
                                 r = _run_one(_make_params(kv, lv, tv))
                                 ret, n_tr, wr, mdd = _calc_summary(r)
-                                row = {"손절(%)":lv,"트레일(%)":tv,
-                                       "수익률(%)":round(ret,2),"거래수":n_tr,
-                                       "승률(%)":round(wr,1),"MDD(%)":round(mdd,2)}
+                                row = {"손절(%)": lv, "트레일(%)": tv}
                                 if not is_log_mode:
-                                    row = {"K": kv, **row}
+                                    row["K"] = kv
+                                # 종목별 수익률 (로그 기반 모드)
+                                if is_log_mode:
+                                    for t in r["trades"]:
+                                        row[t["name"]] = round(t["pnl_rate"] * 100, 2)
+                                row.update({"전체수익률(%)": round(ret,2), "거래수": n_tr,
+                                            "승률(%)": round(wr,1), "MDD(%)": round(mdd,2)})
                                 grid_rows.append(row)
                                 _save_log({"timestamp":datetime.now().isoformat(),"type":"intraday_grid",
                                            "date":actual_date,"K":kv,"loss_pct":lv,"trail_pct":tv,
