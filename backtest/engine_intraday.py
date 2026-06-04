@@ -105,8 +105,8 @@ def run_intraday_backtest(minute_data, daily_data, stock_list, date,
                 peak_price   = 0
                 trail_active = False
             else:
-                stop_p = peak_price * (1 - sc.TRAILING_STOP_RATE) if trail_active else \
-                         holding["buy_price"] * (1 - sc.LOSS_RATE)
+                stop_p = peak_price * (1 - p["TRAILING_STOP_RATE"]) if trail_active else \
+                         holding["buy_price"] * (1 - p["LOSS_RATE"])
                 timeline.append(
                     f"{t} 보유 {holding['name']} | 현재: {bar['close']:,} "
                     f"| 고점: {peak_price:,} | 스탑: {stop_p:,.0f}"
@@ -114,7 +114,7 @@ def run_intraday_backtest(minute_data, daily_data, stock_list, date,
             continue
 
         # ── 미보유: 매수 신호 탐색 ──
-        if trade_count >= sc.MAX_TRADES_PER_DAY:
+        if trade_count >= params["MAX_TRADES_PER_DAY"]:
             break
 
         for cand in available:
@@ -127,8 +127,8 @@ def run_intraday_backtest(minute_data, daily_data, stock_list, date,
 
             # 현재 분봉 종가가 목표가 이상 → 매수 신호
             if bar["close"] >= cand["target"]:
-                buy_p    = cand["target"]    # 목표가에 체결 가정
-                quantity = int(capital * sc.INVEST_RATIO / buy_p)
+                buy_p    = cand["target"]
+                quantity = int(capital * params["INVEST_RATIO"] / buy_p)
                 if quantity < 1:
                     continue
 
