@@ -37,13 +37,13 @@ USE_TRAILING_STOP = True
 # True  : 트레일링 스탑 사용 (고정 익절 대신 고점 추적 익절)
 # False : 기존 고정 익절/손절 방식 유지
 
-TRAILING_STOP_RATE = 0.035
+TRAILING_STOP_RATE = 0.025
 # 고점 대비 하락률 트리거
 # 0.02 = 고점 대비 -2% 하락 시 매도
 # 공격적 (수익 극대화): 0.03 ~ 0.05
 # 안정적 (수익 보전): 0.01 ~ 0.02
 
-TRAILING_STOP_ACTIVATE_RATE = 0.04
+TRAILING_STOP_ACTIVATE_RATE = 0.05
 # 트레일링 스탑 활성화 최소 수익률
 # 0.01 = 매수가 대비 +1% 이상 상승해야 트레일링 스탑 작동
 # 0으로 설정하면 매수 즉시 활성화
