@@ -1,13 +1,25 @@
 import requests
 import json
 import os
+import threading
 from datetime import datetime, timedelta
-import config
+from pathlib import Path
 
-TOKEN_CACHE_FILE = "token_cache.json"
+# 토큰 캐시를 .cache/ 디렉터리에 저장 (git 추적 제외)
+_CACHE_DIR       = Path(__file__).parent / ".cache"
+_CACHE_DIR.mkdir(exist_ok=True)
+TOKEN_CACHE_FILE = str(_CACHE_DIR / "token_cache.json")
+
+_token_lock = threading.Lock()   # 멀티스레드 동시 접근 방지
 
 def get_access_token():
-    # 캐시된 토큰이 있으면 재사용
+    import config
+
+    with _token_lock:
+        return _get_token(config)
+
+
+def _get_token(config):
     if os.path.exists(TOKEN_CACHE_FILE):
         with open(TOKEN_CACHE_FILE, "r") as f:
             cache = json.load(f)
@@ -29,10 +41,9 @@ def get_access_token():
     res.raise_for_status()
     data = res.json()
 
-    token = data["access_token"]
-    expires_at = datetime.now() + timedelta(hours=23)  # 만료 1시간 전 갱신
+    token      = data["access_token"]
+    expires_at = datetime.now() + timedelta(hours=23)
 
-    # 캐시 저장
     with open(TOKEN_CACHE_FILE, "w") as f:
         json.dump({
             "access_token": token,
