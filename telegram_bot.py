@@ -335,57 +335,75 @@ def _notify_timeout():
 
 
 # ──────────────────────────────────────────
-# 전량 매도 문의 (14:00 / 14:30)
+# 개별 종목 선택 매도 문의 (14:00 / 14:30)
 # ──────────────────────────────────────────
+# 반환: list[code] (매도할 종목 코드 목록) | [] (유지 또는 타임아웃)
 
-_sell_state = {"result": None, "event": threading.Event()}
+_partial_sell_state = {
+    "selections": [],   # 선택된 code 리스트
+    "positions":  [],   # 전달받은 positions
+    "event":      threading.Event(),
+}
 
 
-def send_mass_sell_query(positions, timeout=300):
+def send_partial_sell_query(positions, timeout=300):
     """
-    전량 매도 문의 (14시, 14시30분)
-    positions: [{"name","buy_price","current_price","quantity","pnl_rate"}, ...]
-    반환: "SELL_ALL" | "HOLD" (타임아웃 → "HOLD" 자동 유지)
+    개별 종목 선택 매도 문의 (14:00 / 14:30)
+    positions : [{"code","name","buy_price","current_price","quantity"}, ...]
+    반환      : list[code] — 매도할 종목 코드 목록
+                [] — 전체 유지 또는 타임아웃 (자동 유지)
     """
     _check_env()
-    _sell_state["result"] = None
-    _sell_state["event"].clear()
+    _partial_sell_state["selections"] = []
+    _partial_sell_state["positions"]  = list(positions)
+    _partial_sell_state["event"].clear()
 
-    t = threading.Thread(target=_run_sell_query_bot, args=(positions,), daemon=True)
+    t = threading.Thread(target=_run_partial_sell_bot, args=(positions,), daemon=True)
     t.start()
-    responded = _sell_state["event"].wait(timeout=timeout)
-    _sell_state["event"].set()
+    responded = _partial_sell_state["event"].wait(timeout=timeout)
+    _partial_sell_state["event"].set()
     t.join(timeout=5)
 
     if not responded:
         try:
-            asyncio.run(_send_text("⏰ 응답 없음 — 포지션 유지합니다."))
+            asyncio.run(_send_text("⏰ 응답 없음 — 전체 유지합니다."))
         except Exception:
             pass
-        return "HOLD"
-    return _sell_state["result"] or "HOLD"
+        return []
+
+    return _partial_sell_state["selections"]
 
 
-def _run_sell_query_bot(positions):
+def _run_partial_sell_bot(positions):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(_sell_query_main(positions))
+        loop.run_until_complete(_partial_sell_main(positions))
     finally:
         loop.close()
 
 
-async def _sell_query_main(positions):
+async def _partial_sell_main(positions):
     from telegram.ext import Application, CallbackQueryHandler
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CallbackQueryHandler(_sell_query_handler))
+    app.add_handler(CallbackQueryHandler(_partial_sell_handler))
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
+    await app.bot.send_message(
+        chat_id=CHAT_ID,
+        text=_build_partial_sell_header(positions),
+        reply_markup=_build_partial_sell_keyboard(positions, []),
+    )
+    while not _partial_sell_state["event"].is_set():
+        await asyncio.sleep(0.3)
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
 
-    # 메시지 작성
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    lines = ["📤 전량 매도 문의\n"]
+
+def _build_partial_sell_header(positions):
+    lines = ["📤 매도 종목 선택 (⬜ 탭 → ✅, 중복 선택 가능)\n"]
     total_pnl = 0
     for p in positions:
         rate = (p["current_price"] - p["buy_price"]) / p["buy_price"] * 100
@@ -394,32 +412,63 @@ async def _sell_query_main(positions):
         em = "📈" if pnl >= 0 else "📉"
         lines.append(f"{em} {p['name']}  ({rate:+.2f}%)  {pnl:+,}원")
     lines.append(f"\n합계: {total_pnl:+,}원")
-    lines.append("\n전량 매도하시겠습니까?")
-
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📤 전체 매도", callback_data="MASS_SELL"),
-        InlineKeyboardButton("🔒 유지",     callback_data="MASS_HOLD"),
-    ]])
-    await app.bot.send_message(chat_id=CHAT_ID, text="\n".join(lines),
-                               reply_markup=keyboard)
-
-    while not _sell_state["event"].is_set():
-        await asyncio.sleep(0.3)
-    await app.updater.stop()
-    await app.stop()
-    await app.shutdown()
+    return "\n".join(lines)
 
 
-async def _sell_query_handler(update, context):
+def _build_partial_sell_keyboard(positions, selected_codes):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    keyboard = []
+    for p in positions:
+        code  = p["code"]
+        rate  = (p["current_price"] - p["buy_price"]) / p["buy_price"] * 100
+        check = "✅" if code in selected_codes else "⬜"
+        label = f"{check} {p['name']}  ({rate:+.2f}%)"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"SELL_TOGGLE:{code}")])
+
+    n = len(selected_codes)
+    keyboard.append([
+        InlineKeyboardButton(f"📤 선택 매도 ({n}개)", callback_data="SELL_CONFIRM"),
+        InlineKeyboardButton("🔒 전체 유지",          callback_data="SELL_HOLD_ALL"),
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def _partial_sell_handler(update, context):
     query = update.callback_query
     await query.answer()
-    if query.data == "MASS_SELL":
-        await query.edit_message_text("📤 전체 매도 진행합니다.")
-        _sell_state["result"] = "SELL_ALL"
-    else:
-        await query.edit_message_text("🔒 포지션 유지합니다.")
-        _sell_state["result"] = "HOLD"
-    _sell_state["event"].set()
+    data  = query.data
+
+    if data == "SELL_HOLD_ALL":
+        await query.edit_message_text("🔒 전체 유지합니다.")
+        _partial_sell_state["selections"] = []
+        _partial_sell_state["event"].set()
+        return
+
+    if data == "SELL_CONFIRM":
+        sels = _partial_sell_state["selections"]
+        if not sels:
+            await query.answer("선택된 종목이 없습니다.", show_alert=True)
+            return
+        positions = _partial_sell_state["positions"]
+        names = ", ".join(
+            p["name"] for p in positions if p["code"] in sels
+        )
+        await query.edit_message_text(f"📤 매도 진행: {names}")
+        _partial_sell_state["event"].set()
+        return
+
+    if data.startswith("SELL_TOGGLE:"):
+        code      = data.split(":", 1)[1]
+        sels      = _partial_sell_state["selections"]
+        positions = _partial_sell_state["positions"]
+        if code in sels:
+            sels.remove(code)
+        else:
+            sels.append(code)
+        # 키보드 업데이트
+        await query.edit_message_reply_markup(
+            reply_markup=_build_partial_sell_keyboard(positions, sels)
+        )
 
 
 async def _send_text(message):

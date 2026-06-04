@@ -421,14 +421,15 @@ def _send_position_alert(pm):
 
 
 def _handle_mass_sell_query(pm, q_time):
-    """전량매도 문의 처리 (14:00, 14:30)"""
-    from telegram_bot import send_mass_sell_query
-    print(f"\n[{get_now()}] 📤 전량매도 문의 전송 ({q_time})")
+    """개별 종목 선택 매도 문의 처리 (14:00, 14:30)"""
+    from telegram_bot import send_partial_sell_query
+    print(f"\n[{get_now()}] 📤 매도 종목 선택 문의 전송 ({q_time})")
 
     # 포지션 정보 + 현재가 조회
     positions = []
     with pm.lock:
-        infos = dict(pm.positions_info)
+        infos       = dict(pm.positions_info)
+        stop_events = dict(pm.stop_events)
     for code, info in infos.items():
         try:
             cp = get_current_price(code)["현재가"]
@@ -440,16 +441,22 @@ def _handle_mass_sell_query(pm, q_time):
             "buy_price":     info["buy_price"],
             "current_price": cp,
             "quantity":      info["quantity"],
-            "pnl_rate":      (cp - info["buy_price"]) / info["buy_price"],
         })
 
     if not positions:
         return
 
-    result = send_mass_sell_query(positions, timeout=sc.TELEGRAM_CONFIRM_TIMEOUT)
-    if result == "SELL_ALL":
-        print(f"[{get_now()}] 📤 전량 매도 실행")
-        pm.stop_all()   # 모든 포지션 스레드에 강제 청산 신호
+    sell_codes = send_partial_sell_query(positions, timeout=sc.TELEGRAM_CONFIRM_TIMEOUT)
+
+    if not sell_codes:
+        print(f"[{get_now()}] 🔒 전체 유지")
+        return
+
+    print(f"[{get_now()}] 📤 매도 실행: {sell_codes}")
+    for code in sell_codes:
+        ev = stop_events.get(code)
+        if ev:
+            ev.set()   # 해당 종목 스레드에만 강제 청산 신호
 
 
 def restore_positions(pm):
