@@ -221,6 +221,10 @@ with st.sidebar:
         "코스피 풀 크기", 10, 200, sc.KOSPI_POOL_SIZE, 10,
         help="코스피200 중 상위 N개 종목을 스크리닝\n클수록 기회 많지만 속도 느림",
     )
+    kosdaq_size = st.slider(
+        "코스닥 풀 크기", 0, 150, sc.KOSDAQ_POOL_SIZE, 10,
+        help="코스닥150 중 상위 N개 종목을 스크리닝\n0이면 코스닥 비활성화",
+    )
 
     # 런타임 파라미터 반영 (파일 저장은 안 함 — 화면 내 미리보기용)
     sc.K                     = k
@@ -229,6 +233,7 @@ with st.sidebar:
     sc.TRAILING_STOP_RATE    = trailing_rate
     sc.MAX_POSITIONS         = max_positions
     sc.KOSPI_POOL_SIZE       = pool_size
+    sc.KOSDAQ_POOL_SIZE      = kosdaq_size
 
     st.divider()
     st.caption(f"모드: **{'모의' if trading_mode == 'mock' else '실전'}** | "
@@ -1077,6 +1082,7 @@ with tab_config:
         st.markdown("#### 스크리닝 & 실행")
         st.dataframe(pd.DataFrame([
             {"파라미터": "코스피 풀 크기",         "값": str(sc.KOSPI_POOL_SIZE)},
+            {"파라미터": "코스닥 풀 크기",         "값": str(sc.KOSDAQ_POOL_SIZE)},
             {"파라미터": "최대 포지션",            "값": str(sc.MAX_POSITIONS)},
             {"파라미터": "최대 매매 횟수/일",      "값": str(sc.MAX_TRADES_PER_DAY)},
             {"파라미터": "돌파여유율 상한",         "값": f"{sc.MAX_BREAKOUT_GAP}%"},

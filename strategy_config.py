@@ -116,6 +116,11 @@ KOSPI_POOL_SIZE = 200
 # 관심종목(watchlist.py)은 이 숫자와 무관하게 항상 전부 포함
 # 50개 ≈ 25초 / 100개 ≈ 50초 / 200개 ≈ 100초
 
+KOSDAQ_POOL_SIZE = 100
+# 코스닥150 목록에서 실제로 스크리닝할 종목 수 (0 ~ 150)
+# 0으로 설정하면 코스닥 스크리닝 비활성화
+# 기본값 100개 ≈ 50초 추가 소요
+
 # ----------------------------------------------------------------
 # 다종목 순차 전환 설정
 # ----------------------------------------------------------------
@@ -184,7 +189,7 @@ def print_config():
     print(f"  체크 주기   : {CHECK_INTERVAL}초")
     print(f"  최대 매매   : {MAX_TRADES_PER_DAY}회/일")
     print(f"  돌파여유선  : {MAX_BREAKOUT_GAP}% 이내")
-    print(f"  스크리닝 풀 : 코스피200 상위 {KOSPI_POOL_SIZE}개 + 관심종목")
+    print(f"  스크리닝 풀 : 코스피200 상위 {KOSPI_POOL_SIZE}개 + 코스닥150 상위 {KOSDAQ_POOL_SIZE}개 + 관심종목")
     print(f"  최대 포지션 : {MAX_POSITIONS}개 동시 보유")
     print(f"  스크리닝 주기: {SCREENING_INTERVAL}분")
     print("=" * 40)

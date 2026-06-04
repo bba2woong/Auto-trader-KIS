@@ -217,6 +217,116 @@ KOSPI_200 = [
     {"code": "214420", "name": "토니모리"},
 ]
 
+# ----------------------------------------------------------------
+# 코스닥 150 리스트 (시가총액 상위)
+# ----------------------------------------------------------------
+KOSDAQ_150 = [
+    # ── 1~50 (바이오/헬스케어) ──
+    {"code": "086520", "name": "에코프로"},
+    {"code": "247540", "name": "에코프로비엠"},
+    {"code": "196170", "name": "알테오젠"},
+    {"code": "028300", "name": "HLB"},
+    {"code": "141080", "name": "리가켐바이오"},
+    {"code": "214150", "name": "클래시스"},
+    {"code": "068760", "name": "셀트리온제약"},
+    {"code": "091990", "name": "셀트리온헬스케어"},
+    {"code": "145020", "name": "휴젤"},
+    {"code": "086900", "name": "메디톡스"},
+    {"code": "237690", "name": "에스티팜"},
+    {"code": "096530", "name": "씨젠"},
+    {"code": "039200", "name": "오스코텍"},
+    {"code": "328130", "name": "루닛"},
+    {"code": "338220", "name": "뷰노"},
+    {"code": "048260", "name": "오스템임플란트"},
+    {"code": "145720", "name": "덴티움"},
+    {"code": "041830", "name": "인바디"},
+    {"code": "065660", "name": "안트로젠"},
+    {"code": "085620", "name": "대웅바이오"},
+    {"code": "008930", "name": "한미사이언스"},
+    {"code": "215200", "name": "메가스터디교육"},
+    {"code": "190650", "name": "삼성바이오에피스"},
+    {"code": "196300", "name": "애니젠"},
+    {"code": "166480", "name": "코아스템켈로닉스"},
+    {"code": "018290", "name": "브이티"},
+    {"code": "234080", "name": "얼라인드"},
+    {"code": "263720", "name": "디앤씨미디어"},
+    {"code": "322510", "name": "제이엘케이"},
+    {"code": "293490", "name": "카카오게임즈"},
+    # ── 51~100 (2차전지/소재) ──
+    {"code": "278280", "name": "천보"},
+    {"code": "348370", "name": "엔켐"},
+    {"code": "357780", "name": "솔브레인"},
+    {"code": "036830", "name": "솔브레인홀딩스"},
+    {"code": "121600", "name": "나노신소재"},
+    {"code": "022100", "name": "포스코DX"},
+    {"code": "137400", "name": "피엔티"},
+    {"code": "183190", "name": "코미코"},
+    {"code": "336370", "name": "솔루스첨단소재"},
+    {"code": "366330", "name": "위닉스"},
+    {"code": "290660", "name": "SV인베스트먼트"},
+    {"code": "009460", "name": "한국주철관"},
+    {"code": "064800", "name": "T&L"},
+    {"code": "095700", "name": "제넥신"},
+    {"code": "256940", "name": "킵스파마"},
+    {"code": "277810", "name": "레인보우로보틱스"},
+    {"code": "140860", "name": "파크시스템스"},
+    {"code": "005290", "name": "동진쎄미켐"},
+    {"code": "166090", "name": "하나머티리얼즈"},
+    {"code": "204270", "name": "예스티"},
+    # ── 101~150 (IT/반도체/게임/기타) ──
+    {"code": "112040", "name": "위메이드"},
+    {"code": "095660", "name": "네오위즈"},
+    {"code": "069080", "name": "웹젠"},
+    {"code": "192080", "name": "더블유게임즈"},
+    {"code": "225570", "name": "넥슨게임즈"},
+    {"code": "041510", "name": "에스엠"},
+    {"code": "122870", "name": "와이지엔터테인먼트"},
+    {"code": "035900", "name": "JYP엔터"},
+    {"code": "182360", "name": "큐브엔터"},
+    {"code": "056190", "name": "에스에프에이"},
+    {"code": "089030", "name": "테크윙"},
+    {"code": "039440", "name": "에스티아이"},
+    {"code": "240810", "name": "원익IPS"},
+    {"code": "039030", "name": "이오테크닉스"},
+    {"code": "036930", "name": "주성엔지니어링"},
+    {"code": "058470", "name": "리노공업"},
+    {"code": "293780", "name": "오션브릿지"},
+    {"code": "214430", "name": "아이쓰리시스템"},
+    {"code": "039290", "name": "LG이노텍KODEX"},
+    {"code": "403870", "name": "HPSP"},
+    {"code": "093320", "name": "케이탑리츠"},
+    {"code": "217270", "name": "넵튠"},
+    {"code": "203400", "name": "에쎄텍"},
+    {"code": "080220", "name": "제주항공"},
+    {"code": "108670", "name": "LB세미콘"},
+    {"code": "100120", "name": "뷰웍스"},
+    {"code": "051360", "name": "토비스"},
+    {"code": "079550", "name": "LIG넥스원"},
+    {"code": "036540", "name": "SFA반도체"},
+    {"code": "222080", "name": "씨아이에스"},
+    {"code": "034730", "name": "SK스퀘어"},
+    {"code": "041960", "name": "블리자드코리아"},
+    {"code": "054540", "name": "삼기오토모티브"},
+    {"code": "095340", "name": "ISC"},
+    {"code": "357550", "name": "티에스아이"},
+    {"code": "323280", "name": "태성"},
+    {"code": "089790", "name": "세움파트너스"},
+    {"code": "178920", "name": "PI첨단소재"},
+    {"code": "038110", "name": "에코마이스터"},
+    {"code": "053290", "name": "NE능률"},
+    {"code": "049630", "name": "재영솔루텍"},
+    {"code": "060280", "name": "큐렉소"},
+    {"code": "007390", "name": "네이처셀"},
+    {"code": "222420", "name": "이에이트"},
+    {"code": "064760", "name": "티씨케이"},
+    {"code": "102940", "name": "코오롱생명과학"},
+    {"code": "085490", "name": "로보스타"},
+    {"code": "950200", "name": "파나진"},
+    {"code": "211050", "name": "인카금융서비스"},
+    {"code": "347700", "name": "스피어파워"},
+]
+
+
 def get_headers(tr_id):
     token = get_access_token()
     return {
@@ -515,27 +625,42 @@ def _resolve_name(code, kospi_map):
 
 def build_screening_pool():
     """
-    코스피200(상위 N개) + 관심종목 합치기 (중복 제거)
+    코스피200(상위 N개) + 코스닥150(상위 M개) + 관심종목 합치기 (중복 제거)
     N = strategy_config.KOSPI_POOL_SIZE
+    M = strategy_config.KOSDAQ_POOL_SIZE  (0이면 코스닥 비활성화)
     관심종목은 코드만 입력하면 이름 자동 조회.
     """
-    n        = min(sc.KOSPI_POOL_SIZE, len(KOSPI_200))
-    kospi_map = {s["code"]: s["name"] for s in KOSPI_200}  # code → name 조회용
+    n_kospi  = min(sc.KOSPI_POOL_SIZE,  len(KOSPI_200))
+    n_kosdaq = min(sc.KOSDAQ_POOL_SIZE, len(KOSDAQ_150))
+
+    # 이름 조회용 맵 (코스피 + 코스닥 합산)
+    name_map = {s["code"]: s["name"] for s in KOSPI_200}
+    name_map.update({s["code"]: s["name"] for s in KOSDAQ_150})
 
     # 코스피200 상위 N개
-    pool = {s["code"]: s for s in KOSPI_200[:n]}
+    pool = {s["code"]: s for s in KOSPI_200[:n_kospi]}
 
-    # 관심종목 추가 (코드만 있으면 이름 자동 채움)
+    # 코스닥150 상위 M개 (KOSDAQ_POOL_SIZE > 0 일 때만)
+    kosdaq_new = 0
+    if n_kosdaq > 0:
+        for s in KOSDAQ_150[:n_kosdaq]:
+            if s["code"] not in pool:
+                pool[s["code"]] = s
+                kosdaq_new += 1
+
+    # 관심종목 추가
     watchlist_new = 0
     for code in WATCHLIST_CODES:
         if code not in pool:
             watchlist_new += 1
-            pool[code] = {"code": code, "name": _resolve_name(code, kospi_map)}
-        # 코스피200에 이미 있으면 그대로 유지 (이름 정보 있음)
+            pool[code] = {"code": code, "name": _resolve_name(code, name_map)}
 
     result = list(pool.values())
-    print(f"  스크리닝 풀: 코스피200 상위 {n}개 + 관심종목 {len(WATCHLIST_CODES)}개 "
-          f"(신규 {watchlist_new}개) = 총 {len(result)}개")
+    print(
+        f"  스크리닝 풀: 코스피200 상위 {n_kospi}개 + "
+        f"코스닥150 상위 {kosdaq_new}개 + "
+        f"관심종목 {len(WATCHLIST_CODES)}개 = 총 {len(result)}개"
+    )
     return result
 
 _GRADE_ORDER = {"A": 0, "B": 1, "C": 2}
