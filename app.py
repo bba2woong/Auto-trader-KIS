@@ -325,6 +325,33 @@ def _show_single_result(result):
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+def _pnl_color(val):
+    """
+    수익률 셀 색상
+    양수 → 청색 (파랑), 음수 → 적색 (빨강)
+    0.5%마다 한 단계씩 채도 증가, 최대 ±5% 기준 (10단계)
+    """
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if v == 0:
+        return "background-color: white"
+
+    steps     = min(10, max(1, int(abs(v) / 0.5) + (1 if abs(v) % 0.5 > 0.05 else 0)))
+    intensity = steps / 10.0   # 0.1 ~ 1.0
+
+    base      = int(255 * (1 - intensity * 0.85))
+    text_col  = "white" if intensity >= 0.6 else "#111111"
+
+    if v > 0:
+        color = f"rgb({base},{base},255)"
+    else:
+        color = f"rgb(255,{base},{base})"
+
+    return f"background-color: {color}; color: {text_col}"
+
+
 def _show_grid_result(grid_rows):
     """파라미터 범위 그리드 결과 테이블"""
     st.subheader(f"파라미터 최적화 결과  ({len(grid_rows)}개 조합)")
@@ -332,13 +359,12 @@ def _show_grid_result(grid_rows):
     sort_col = "전체수익률(%)" if "전체수익률(%)" in df.columns else "수익률(%)"
     df       = df.sort_values(sort_col, ascending=False)
 
-    # 종목별 수익률 컬럼 (고정 컬럼이 아닌 것 = 종목명)
-    fixed = {"K","손절(%)","트레일(%)","전체수익률(%)","수익률(%)","거래수","승률(%)","MDD(%)"}
+    fixed      = {"K","손절(%)","트레일(%)","전체수익률(%)","수익률(%)","거래수","승률(%)","MDD(%)"}
     stock_cols = [c for c in df.columns if c not in fixed]
-    grad_cols  = [sort_col] + stock_cols
+    color_cols = [sort_col] + stock_cols   # 수익률 관련 컬럼에 색상 적용
 
     st.dataframe(
-        df.style.background_gradient(subset=grad_cols, cmap="RdYlGn"),
+        df.style.map(_pnl_color, subset=color_cols),
         use_container_width=True, hide_index=True,
     )
     best  = df.iloc[0]
