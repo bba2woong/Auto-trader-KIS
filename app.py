@@ -355,16 +355,21 @@ with tab_backtest:
             start_date = st.date_input("시작일", value=datetime.now() - timedelta(days=180))
         with col2:
             end_date   = st.date_input("종료일", value=datetime.now())
+        with col3:
+            initial_capital = st.number_input("초기 자금 (원)", value=10_000_000, step=1_000_000)
+
+        pool_option  = st.selectbox("종목 풀", ["kospi","watchlist","custom"],
+                                    format_func=lambda x: {"kospi": f"코스피200 상위 {sc.KOSPI_POOL_SIZE}개 + 관심종목",
+                                                           "watchlist":"관심종목만","custom":"직접 입력"}[x])
+        custom_codes = st.text_input("종목 코드 (콤마 구분)", placeholder="005930,000660") if pool_option == "custom" else ""
     else:
+        # 단타: 날짜 + 초기자금만 (종목 풀은 매매 로그에서 자동)
         with col1:
             bt_date = st.date_input("날짜 (최근 7일 이내)", value=datetime.now() - timedelta(days=1))
-    with col3:
-        initial_capital = st.number_input("초기 자금 (원)", value=10_000_000, step=1_000_000)
-
-    pool_option  = st.selectbox("종목 풀", ["kospi","watchlist","custom"],
-                                format_func=lambda x: {"kospi": f"코스피200 상위 {sc.KOSPI_POOL_SIZE}개 + 관심종목",
-                                                       "watchlist":"관심종목만","custom":"직접 입력"}[x])
-    custom_codes = st.text_input("종목 코드 (콤마 구분)", placeholder="005930,000660") if pool_option == "custom" else ""
+        with col3:
+            initial_capital = st.number_input("초기 자금 (원)", value=10_000_000, step=1_000_000)
+        pool_option  = "log_based"
+        custom_codes = ""
 
     # ── 파라미터 범위 설정 (단타 전용) ──
     if bt_type == "intraday":
@@ -481,23 +486,22 @@ with tab_backtest:
             st.rerun()
 
     if run_btn:
-        # 로그 기반 단타: 선택 종목 확인
-        if bt_type == "intraday" and pool_option == "log_based":
-            if not selected_codes:
-                st.error("종목을 1개 이상 선택하세요.")
-                st.stop()
-            stock_list = stock_list_for_bt
-        else:
-            stock_list = None   # 아래에서 구성
-
         prog_bar  = st.progress(0)
         prog_text = st.empty()
         try:
-            if stock_list is None:
-                stock_list = _build_stock_list_ui(pool_option, custom_codes)
-            budget_per_pos = initial_capital / st.session_state.get("bt_n_positions", sc.MAX_POSITIONS) \
-                             if bt_type == "intraday" and pool_option == "log_based" \
-                             else initial_capital * sc.INVEST_RATIO / sc.MAX_POSITIONS
+            if bt_type == "intraday":
+                # 단타: 로그 기반 or 폴백
+                if pool_option == "log_based" and 'stock_list_for_bt' in dir():
+                    if not selected_codes:
+                        st.error("종목을 1개 이상 선택하세요.")
+                        st.stop()
+                    stock_list = stock_list_for_bt
+                else:
+                    stock_list = _build_stock_list_ui("kospi", "")
+                budget_per_pos = initial_capital / st.session_state.get("bt_n_positions", sc.MAX_POSITIONS)
+            else:
+                stock_list     = _build_stock_list_ui(pool_option, custom_codes)
+                budget_per_pos = initial_capital * sc.INVEST_RATIO / sc.MAX_POSITIONS
 
             if bt_type == "daily":
                 sd = start_date.strftime("%Y%m%d")
