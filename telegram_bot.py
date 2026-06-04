@@ -58,7 +58,8 @@ def send_and_wait(candidates, timeout=300):
     반환: {"code","name"} | "PASS" | None
     """
     _check_env()
-    _state["result"] = None
+    _state["result"]     = None
+    _state["candidates"] = list(candidates)
     _state["event"].clear()
 
     t = threading.Thread(target=_run_single_bot, args=(candidates,), daemon=True)
@@ -161,7 +162,13 @@ async def _single_button_handler(update, context):
         _state["result"] = "PASS"
     elif data.startswith("BUY:"):
         _, code, name = data.split(":", 2)
-        await query.edit_message_text(f"✅ {name} 선택 완료!\n매수 진행합니다.")
+        # 미선택 종목 목록도 표시
+        cands     = _state.get("candidates", [])
+        skipped   = [c["name"] for c in cands if c["code"] != code]
+        skip_text = ""
+        if skipped:
+            skip_text = f"\n\n선택 포기 {len(skipped)}개:\n" + "\n".join(f"  - {n}" for n in skipped)
+        await query.edit_message_text(f"✅ {name} 선택 완료!\n매수 진행합니다.{skip_text}")
         _state["result"] = {"code": code, "name": name}
 
     _state["event"].set()
@@ -211,8 +218,16 @@ async def _multi_button_handler(update, context):
         if not sels:
             await query.answer("선택된 종목이 없습니다.", show_alert=True)
             return
-        names = ", ".join(s["name"] for s in sels)
-        await query.edit_message_text(f"✅ 선택 완료!\n{names}\n총 {len(sels)}개 매수 진행합니다.")
+        sel_names  = ", ".join(s["name"] for s in sels)
+        sel_codes  = {s["code"] for s in sels}
+        cands      = _multi_state["candidates"]
+        skipped    = [c["name"] for c in cands if c["code"] not in sel_codes]
+        skip_text  = ""
+        if skipped:
+            skip_text = f"\n\n선택 포기 {len(skipped)}개:\n" + "\n".join(f"  - {n}" for n in skipped)
+        await query.edit_message_text(
+            f"✅ 선택 완료!\n{sel_names}\n총 {len(sels)}개 매수 진행합니다.{skip_text}"
+        )
         _multi_state["event"].set()
         return
 
@@ -317,6 +332,94 @@ def _notify_timeout():
         asyncio.run(_send_text("⏰ 응답 없음 — 이번 라운드를 건너뜁니다."))
     except Exception:
         pass
+
+
+# ──────────────────────────────────────────
+# 전량 매도 문의 (14:00 / 14:30)
+# ──────────────────────────────────────────
+
+_sell_state = {"result": None, "event": threading.Event()}
+
+
+def send_mass_sell_query(positions, timeout=300):
+    """
+    전량 매도 문의 (14시, 14시30분)
+    positions: [{"name","buy_price","current_price","quantity","pnl_rate"}, ...]
+    반환: "SELL_ALL" | "HOLD" (타임아웃 → "HOLD" 자동 유지)
+    """
+    _check_env()
+    _sell_state["result"] = None
+    _sell_state["event"].clear()
+
+    t = threading.Thread(target=_run_sell_query_bot, args=(positions,), daemon=True)
+    t.start()
+    responded = _sell_state["event"].wait(timeout=timeout)
+    _sell_state["event"].set()
+    t.join(timeout=5)
+
+    if not responded:
+        try:
+            asyncio.run(_send_text("⏰ 응답 없음 — 포지션 유지합니다."))
+        except Exception:
+            pass
+        return "HOLD"
+    return _sell_state["result"] or "HOLD"
+
+
+def _run_sell_query_bot(positions):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_sell_query_main(positions))
+    finally:
+        loop.close()
+
+
+async def _sell_query_main(positions):
+    from telegram.ext import Application, CallbackQueryHandler
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CallbackQueryHandler(_sell_query_handler))
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+
+    # 메시지 작성
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    lines = ["📤 전량 매도 문의\n"]
+    total_pnl = 0
+    for p in positions:
+        rate = (p["current_price"] - p["buy_price"]) / p["buy_price"] * 100
+        pnl  = (p["current_price"] - p["buy_price"]) * p["quantity"]
+        total_pnl += pnl
+        em = "📈" if pnl >= 0 else "📉"
+        lines.append(f"{em} {p['name']}  ({rate:+.2f}%)  {pnl:+,}원")
+    lines.append(f"\n합계: {total_pnl:+,}원")
+    lines.append("\n전량 매도하시겠습니까?")
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📤 전체 매도", callback_data="MASS_SELL"),
+        InlineKeyboardButton("🔒 유지",     callback_data="MASS_HOLD"),
+    ]])
+    await app.bot.send_message(chat_id=CHAT_ID, text="\n".join(lines),
+                               reply_markup=keyboard)
+
+    while not _sell_state["event"].is_set():
+        await asyncio.sleep(0.3)
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
+
+
+async def _sell_query_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "MASS_SELL":
+        await query.edit_message_text("📤 전체 매도 진행합니다.")
+        _sell_state["result"] = "SELL_ALL"
+    else:
+        await query.edit_message_text("🔒 포지션 유지합니다.")
+        _sell_state["result"] = "HOLD"
+    _sell_state["event"].set()
 
 
 async def _send_text(message):

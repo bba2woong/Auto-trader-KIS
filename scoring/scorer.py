@@ -24,7 +24,7 @@ import strategy_config as sc
 CACHE_DIR  = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
-REFRESH_TIMES = ["0830", "1000", "1300"]   # 캐시 갱신 시각 (HH:MM 없는 HHMM)
+REFRESH_TIMES = ["0830", "1000", "1200"]   # 캐시 갱신 시각 (HH:MM 없는 HHMM)
 
 
 # ──────────────────────────────────────────

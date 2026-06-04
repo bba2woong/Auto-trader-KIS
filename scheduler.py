@@ -51,13 +51,14 @@ def _telegram_enabled():
 # ──────────────────────────────────────────
 
 def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
-                     restore_buy_price=0, restore_quantity=0):
+                     restore_buy_price=0, restore_quantity=0, stop_event=None):
     """
     단일 종목 매매 루프. 스레드로 실행.
     budget             : 포지션당 배정 예산 (원)
     on_close           : 청산 시 호출할 콜백 (result, stock_code)
     restore_buy_price  : 재시작 복구 시 기존 매수가 (0이면 신규 진입 대기)
     restore_quantity   : 재시작 복구 시 기존 보유 수량
+    stop_event         : 외부에서 강제 청산 요청 시 set()
     """
     tag = f"[슬롯{slot_no}] {stock_name}({stock_code})"
     print(f"\n{'='*44}")
@@ -92,18 +93,39 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
 
     print(f"\n[{get_now()}] {tag} 매수 대기 중...")
 
+    def _do_sell(sell_price, reason):
+        """매도 실행 + 로그 + 알람봇 공통 처리"""
+        sell_stock(stock_code, quantity)
+        tlog.log_sell(stock_code, stock_name, buy_price, sell_price, quantity, reason, slot_no)
+        try:
+            from telegram_alarm import notify_sell_filled
+            notify_sell_filled(stock_name, buy_price, sell_price, quantity, reason)
+        except Exception:
+            pass
+
     while True:
         now_str = datetime.now().strftime("%H:%M")
+
+        # 외부 강제 청산 요청 (전량매도 버튼 등)
+        if stop_event and stop_event.is_set() and bought and quantity > 0:
+            print(f"\n[{get_now()}] {tag} 📤 외부 전량매도 요청")
+            try:
+                cp = get_current_price(stock_code).get("현재가", buy_price)
+                _do_sell(cp, "전량매도")
+            except Exception as e:
+                print(f"  ⚠️ 전량매도 실패: {e}")
+            if on_close:
+                on_close("전량매도", stock_code)
+            return
 
         if is_force_sell_time():
             if bought and quantity > 0:
                 print(f"\n[{get_now()}] {tag} ⏰ 강제 청산")
                 try:
-                    sell_stock(stock_code, quantity)
                     cp = get_current_price(stock_code).get("현재가", buy_price)
+                    _do_sell(cp, "강제청산")
                 except Exception:
-                    cp = buy_price  # 조회 실패 시 매수가로 대체
-                tlog.log_sell(stock_code, stock_name, buy_price, cp, quantity, "강제청산", slot_no)
+                    tlog.log_sell(stock_code, stock_name, buy_price, buy_price, quantity, "강제청산", slot_no)
                 result = "강제청산"
             else:
                 result = "강제청산(미체결)"
@@ -143,6 +165,15 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
                         bought     = True
                         print(f"  {tag} 매수 @ {buy_price:,}원 × {quantity}주")
                         tlog.log_buy(stock_code, stock_name, buy_price, quantity, budget, slot_no)
+                        # 알람봇: 매수 체결 알림
+                        try:
+                            from telegram_alarm import notify_buy_filled
+                            notify_buy_filled(stock_name, buy_price, quantity)
+                        except Exception:
+                            pass
+                        # PositionManager에 포지션 정보 등록 (수익률 알림용)
+                        if on_close and hasattr(on_close, '__self__'):
+                            on_close.__self__.register_buy(stock_code, stock_name, buy_price, quantity)
                     else:
                         if not breakout_seen:
                             print(f"\n[{get_now()}] {tag} ⚠️ 고점 보류 (여유율 {gap:.2f}%)")
@@ -166,15 +197,13 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
                         print(f"[{get_now()}] {tag} {rate_str} | 고점:{peak_price:,} 스탑:{stop_price:,.0f}", end="\r")
                     if signal == "트레일링스탑":
                         print(f"\n[{get_now()}] {tag} 📉 트레일링 스탑 ({rate_str})")
-                        sell_stock(stock_code, quantity)
-                        tlog.log_sell(stock_code, stock_name, buy_price, current_price, quantity, "트레일링스탑", slot_no)
+                        _do_sell(current_price, "트레일링스탑")
                         if on_close:
                             on_close("트레일링스탑", stock_code)
                         return
                     elif signal == "손절":
                         print(f"\n[{get_now()}] {tag} 🔻 손절 ({rate_str})")
-                        sell_stock(stock_code, quantity)
-                        tlog.log_sell(stock_code, stock_name, buy_price, current_price, quantity, "손절", slot_no)
+                        _do_sell(current_price, "손절")
                         if on_close:
                             on_close("손절", stock_code)
                         return
@@ -184,8 +213,7 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
                     print(f"[{get_now()}] {tag} {rate_str}", end="\r")
                     if signal:
                         print(f"\n[{get_now()}] {tag} {'✅ 익절' if signal == '익절' else '🔻 손절'} ({rate_str})")
-                        sell_stock(stock_code, quantity)
-                        tlog.log_sell(stock_code, stock_name, buy_price, current_price, quantity, signal, slot_no)
+                        _do_sell(current_price, signal)
                         if on_close:
                             on_close(signal, stock_code)
                         return
@@ -222,12 +250,14 @@ class PositionManager:
     - 각 포지션은 독립 스레드
     """
     def __init__(self, budget_per_slot):
-        self.budget       = budget_per_slot
-        self.lock         = threading.Lock()
-        self.active       = {}   # {code: thread}
-        self.cooldown_map = {}   # {code: timestamp}
-        self.daily_log    = []
-        self.trade_count  = 0
+        self.budget        = budget_per_slot
+        self.lock          = threading.Lock()
+        self.active        = {}    # {code: thread}
+        self.stop_events   = {}    # {code: threading.Event}  외부 강제 청산용
+        self.positions_info = {}   # {code: {"name","buy_price","quantity"}}
+        self.cooldown_map  = {}    # {code: timestamp}
+        self.daily_log     = []
+        self.trade_count   = 0
 
     @property
     def free_slots(self):
@@ -236,6 +266,19 @@ class PositionManager:
     def in_cooldown(self, code):
         last = self.cooldown_map.get(code)
         return last and (time.time() - last) < sc.SAME_STOCK_COOLDOWN
+
+    def register_buy(self, code, name, buy_price, quantity):
+        """매수 체결 시 포지션 정보 등록 (수익률 알림용)"""
+        with self.lock:
+            self.positions_info[code] = {
+                "name": name, "buy_price": buy_price, "quantity": quantity
+            }
+
+    def stop_all(self):
+        """모든 포지션에 강제 청산 요청"""
+        with self.lock:
+            for event in self.stop_events.values():
+                event.set()
 
     def open(self, stock, slot_no, jitter=True):
         """
@@ -247,6 +290,10 @@ class PositionManager:
         restore_price     = stock.get("buy_price_hint", 0)
         restore_qty       = stock.get("qty_hint", 0)
 
+        stop_event = threading.Event()
+        with self.lock:
+            self.stop_events[code] = stop_event
+
         def _run_with_jitter():
             if jitter:
                 time.sleep(random.uniform(0, 3))
@@ -254,6 +301,7 @@ class PositionManager:
                 code, stock["name"], slot_no, self.budget, self._on_close,
                 restore_buy_price=restore_price,
                 restore_quantity=restore_qty,
+                stop_event=stop_event,
             )
 
         t = threading.Thread(target=_run_with_jitter, daemon=True)
@@ -265,17 +313,22 @@ class PositionManager:
               f"| 활성: {len(self.active)}/{sc.MAX_POSITIONS}")
 
     def _on_close(self, result, code):
+        pinfo = {}
         with self.lock:
             self.active.pop(code, None)
+            self.stop_events.pop(code, None)
+            pinfo = self.positions_info.pop(code, {})
             self.cooldown_map[code] = time.time()
-            self.daily_log.append({"코드": code, "결과": result})
-        print(f"\n[{get_now()}] 포지션 종료: {code} → {result} "
+            self.daily_log.append({"코드": code, "이름": pinfo.get("name", code), "결과": result})
+        name = pinfo.get("name", code)
+        print(f"\n[{get_now()}] 포지션 종료: {name} → {result} "
               f"| 활성: {len(self.active)}/{sc.MAX_POSITIONS}")
 
+        # 기존 선택봇 알림 (종목명으로)
         if _telegram_enabled():
             from telegram_bot import notify
             emoji = "✅" if result in ("익절", "트레일링스탑") else "🔻" if result == "손절" else "⏰"
-            notify(f"{emoji} *{code}* 청산 완료\n결과: {result}\n"
+            notify(f"{emoji} {name} 청산 완료\n결과: {result}\n"
                    f"활성 포지션: {len(self.active)}/{sc.MAX_POSITIONS}")
 
     def print_summary(self):
@@ -321,6 +374,82 @@ def _score_and_route(candidate):
     score_dict = total_score(candidate)
     route      = routing(score_dict["total"])
     return score_dict, route
+
+
+def _start_alert_thread(pm):
+    """보유 종목 수익률 정기 알림 백그라운드 스레드"""
+    def _alert_loop():
+        import calendar
+        last_alert_min = -1
+        while True:
+            now = datetime.now()
+            hhmm = now.strftime("%H:%M")
+            # 장 시작 30분 후(09:30)부터 15:00까지, POSITION_ALERT_INTERVAL 분마다
+            if "09:30" <= hhmm <= "15:00":
+                # 알림 주기에 해당하는 분인지 확인
+                cur_min = now.hour * 60 + now.minute
+                if cur_min % sc.POSITION_ALERT_INTERVAL == 0 and cur_min != last_alert_min:
+                    last_alert_min = cur_min
+                    _send_position_alert(pm)
+            time.sleep(30)
+
+    t = threading.Thread(target=_alert_loop, daemon=True)
+    t.start()
+
+
+def _send_position_alert(pm):
+    """현재 보유 종목 수익률 조회 후 알람봇 전송"""
+    try:
+        from telegram_alarm import notify_position_status
+        positions = []
+        with pm.lock:
+            infos = dict(pm.positions_info)
+        for code, info in infos.items():
+            try:
+                cp = get_current_price(code)["현재가"]
+                positions.append({
+                    "name":          info["name"],
+                    "buy_price":     info["buy_price"],
+                    "current_price": cp,
+                    "quantity":      info["quantity"],
+                })
+            except Exception:
+                pass
+        notify_position_status(positions)
+    except Exception:
+        pass
+
+
+def _handle_mass_sell_query(pm, q_time):
+    """전량매도 문의 처리 (14:00, 14:30)"""
+    from telegram_bot import send_mass_sell_query
+    print(f"\n[{get_now()}] 📤 전량매도 문의 전송 ({q_time})")
+
+    # 포지션 정보 + 현재가 조회
+    positions = []
+    with pm.lock:
+        infos = dict(pm.positions_info)
+    for code, info in infos.items():
+        try:
+            cp = get_current_price(code)["현재가"]
+        except Exception:
+            cp = info["buy_price"]
+        positions.append({
+            "code":          code,
+            "name":          info["name"],
+            "buy_price":     info["buy_price"],
+            "current_price": cp,
+            "quantity":      info["quantity"],
+            "pnl_rate":      (cp - info["buy_price"]) / info["buy_price"],
+        })
+
+    if not positions:
+        return
+
+    result = send_mass_sell_query(positions, timeout=sc.TELEGRAM_CONFIRM_TIMEOUT)
+    if result == "SELL_ALL":
+        print(f"[{get_now()}] 📤 전량 매도 실행")
+        pm.stop_all()   # 모든 포지션 스레드에 강제 청산 신호
 
 
 def restore_positions(pm):
@@ -397,14 +526,20 @@ def run_scheduler():
     budget_per_slot = calc_position_budget()
 
     pm = PositionManager(budget_per_slot)
-    slot_counter = 0
+    slot_counter     = 0
     last_screen_time = 0
+    mass_sell_sent   = set()   # 전량매도 문의를 보낸 시각 추적
 
     # 재시작 시 기존 보유 포지션 복구
     print(f"\n[{get_now()}] 기존 포지션 복구 확인 중...")
     restore_positions(pm)
 
+    # 보유 종목 수익률 정기 알림 스레드 시작
+    _start_alert_thread(pm)
+
     while True:
+        now_hhmm = datetime.now().strftime("%H:%M")
+
         # 종료 조건
         if is_force_sell_time():
             print(f"\n[{get_now()}] ⏰ 강제 청산 시간 — 신규 진입 중단, 기존 포지션 청산 대기")
@@ -413,6 +548,19 @@ def run_scheduler():
         if pm.trade_count >= sc.MAX_TRADES_PER_DAY:
             print(f"\n[{get_now()}] 최대 매매 횟수({sc.MAX_TRADES_PER_DAY}회) 도달")
             break
+
+        # ── 14:00 / 14:30 전량매도 문의 ──
+        for q_time in sc.MASS_SELL_QUERY_TIMES:
+            if now_hhmm >= q_time and q_time not in mass_sell_sent:
+                mass_sell_sent.add(q_time)
+                if pm.active and use_telegram:
+                    _handle_mass_sell_query(pm, q_time)
+
+        # ── 스크리닝 종료 시각 이후 신규 진입 중단 ──
+        if now_hhmm >= sc.SCREENING_END_TIME:
+            print(f"[{get_now()}] 스크리닝 종료 시각({sc.SCREENING_END_TIME}) 이후 — 신규 진입 없음", end="\r")
+            time.sleep(30)
+            continue
 
         # 빈 슬롯 없으면 대기
         if pm.free_slots <= 0:
