@@ -363,9 +363,91 @@ def detect_candle_pattern(daily):
     return None
 
 
+def get_prev_hour_candle(stock_code):
+    """
+    직전 완성 시간봉 조회 (60분 집계)
+    예) 10:23 → 09:00~09:59 봉 조회 (FID_INPUT_HOUR_1 = "090000")
+        11:50 → 10:00~10:59 봉 조회 (FID_INPUT_HOUR_1 = "100000")
+    반환: {"open","high","low","close","volume"} 또는 None
+    """
+    try:
+        now       = datetime.now()
+        prev_hour = now.hour - 1
+        if prev_hour < 9:   # 09:xx 이전이면 시간봉 없음
+            return None
+
+        hour_str = f"{prev_hour:02d}0000"   # "090000", "100000" 등
+        url      = f"{config.BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        headers  = get_headers("FHKST03010200")
+        params   = {
+            "FID_ETC_CLS_CODE":       "0",
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD":         stock_code,
+            "FID_INPUT_HOUR_1":       f"{now.hour:02d}0000",  # 현재 정각 기준으로 이전 조회
+            "FID_PW_DATA_INCU_YN":    "N",
+        }
+
+        res = request_with_retry(url, headers, params)
+        if res is None:
+            return None
+
+        data = res.json()
+        if data["rt_cd"] != "0":
+            return None
+
+        rows = data.get("output2") or []
+        if not rows:
+            return None
+
+        # 직전 시간(prev_hour)에 해당하는 분봉만 필터링
+        ph_str = f"{prev_hour:02d}"
+        bars   = [r for r in rows if r.get("stck_cntg_hour", "").startswith(ph_str)]
+        if not bars:
+            return None
+
+        # OHLCV 집계 (bars는 최신→과거 순: bars[0]=xx:59, bars[-1]=xx:00)
+        highs  = [int(b["stck_hgpr"]) for b in bars]
+        lows   = [int(b["stck_lwpr"]) for b in bars]
+        vols   = [int(b["cntg_vol"])  for b in bars]
+
+        return {
+            "open":   int(bars[-1]["stck_oprc"]),  # 해당 시간 첫 분봉 시가
+            "high":   max(highs),
+            "low":    min(lows),
+            "close":  int(bars[0]["stck_prpr"]),   # 해당 시간 마지막 분봉 종가
+            "volume": sum(vols),
+        }
+    except Exception:
+        return None
+
+
+def is_strong_bull_candle(candle: dict) -> bool:
+    """
+    강한 양봉 조건:
+      1. 양봉 (종가 > 시가)
+      2. 몸통 / 전체범위 >= 0.7
+      3. 위꼬리 <= 몸통 * 0.3
+    """
+    if candle is None:
+        return False
+    o, h, l, c = candle["open"], candle["high"], candle["low"], candle["close"]
+    total_range = h - l
+    if total_range == 0:
+        return False
+    body        = c - o
+    upper_wick  = h - c
+    if body <= 0:                                   # 양봉이 아님
+        return False
+    if body / total_range < 0.7:                    # 몸통 비율 미달
+        return False
+    if upper_wick > body * 0.3:                     # 위꼬리 과다
+        return False
+    return True
+
+
 def check_volatility_breakout(stock_code):
     """
-    변동성 돌파 조건 체크 + 캔들 패턴 감지
+    변동성 돌파 조건 체크 + 캔들 패턴 + 60분봉 강한 양봉 감지
     목표가 = 시가 + (전일 고가 - 전일 저가) × K
     """
     try:
@@ -386,6 +468,10 @@ def check_volatility_breakout(stock_code):
         ad_rising     = calc_ad_line(daily)
         pattern       = detect_candle_pattern(daily)
 
+        # 60분봉 강한 양봉 감지 (모든 종목에 대해 수행)
+        hour_candle   = get_prev_hour_candle(stock_code)
+        strong_bull   = "strong_bull" if is_strong_bull_candle(hour_candle) else None
+
         return {
             "code":       stock_code,
             "현재가":     current["현재가"],
@@ -396,6 +482,7 @@ def check_volatility_breakout(stock_code):
             "AD상승":     ad_rising,
             "돌파여유율": (current["현재가"] - target) / target * 100 if target > 0 else 0,
             "패턴":       pattern,
+            "시간봉패턴": strong_bull,
         }
 
     except Exception as e:
@@ -403,19 +490,21 @@ def check_volatility_breakout(stock_code):
         return None
 
 
-def _grade(volatility_ok, ad_rising, gap, pattern):
+def _grade(volatility_ok, ad_rising, gap, pattern, 시간봉패턴=None):
     """
     매수 우선순위 그레이드
-    A : 변동성 돌파 + AD상승 + 해머  → 최우선 매수
-    B : 변동성 돌파 + AD상승         → 기존 전략
-    C : 해머 패턴만                  → 내일 진입 검토
+    A : 변동성돌파 + AD상승 + (해머 또는 strong_bull) → 최우선 매수
+    B : 변동성돌파 + AD상승                           → 기존 전략
+    C : 해머만 또는 strong_bull만 (돌파 미통과)       → 관심 대기
     """
-    breakout = volatility_ok and ad_rising and gap <= sc.MAX_BREAKOUT_GAP
-    if breakout and pattern == "hammer":
+    breakout    = volatility_ok and ad_rising and gap <= sc.MAX_BREAKOUT_GAP
+    strong_bull = (시간봉패턴 == "strong_bull")
+
+    if breakout and (pattern == "hammer" or strong_bull):
         return "A"
     if breakout:
         return "B"
-    if pattern == "hammer":
+    if pattern == "hammer" or strong_bull:
         return "C"
     return None
 
@@ -487,7 +576,8 @@ def run_screening(progress_cb=None):
 
         grade = _grade(
             result["변동성돌파"], result["AD상승"],
-            result["돌파여유율"], result["패턴"]
+            result["돌파여유율"], result["패턴"],
+            result.get("시간봉패턴"),
         )
 
         if grade:
@@ -498,6 +588,7 @@ def run_screening(progress_cb=None):
                 "목표가":     result["목표가"],
                 "돌파여유율": result["돌파여유율"],
                 "패턴":       result["패턴"],
+                "시간봉패턴": result.get("시간봉패턴"),
                 "grade":      grade,
                 # scorer.py technical_score() 에서 사용
                 "변동성돌파": result["변동성돌파"],

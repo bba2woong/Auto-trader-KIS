@@ -1,16 +1,19 @@
 """
 종목 총점 계산 + 일별 캐시 관리
 
-점수 구성 (총 100점):
-  변동성 돌파  30점  — 돌파 여부 + 여유율 (낮을수록 고점)
-  AD Line     30점  — 상승 여부
-  캔들 패턴   ±10점  — 해머 +10 / 행잉맨 -10 / 없음 0
-  LLM 분석    20점  — bullish=20 / neutral=10 / bearish=0
-  DART 공시   10점  — 긍정=10 / 중립=0 / 부정=-10
+점수 구성 (최대 100점):
+  변동성 돌파  최대 30점 — 돌파 여부 + 여유율 (낮을수록 고점)
+  AD Line      25점      — 상승 여부
+  캔들 패턴    +10점     — 해머 +10 / 행잉맨 0 (패널티 없음)
+  60분봉 강봉  +15점     — strong_bull 감지 시
+  LLM 분석     최대 10점 — bullish=10 / neutral=5 / bearish=0  (llm_score // 2)
+  DART 공시    +10점     — 긍정=10 / 중립=0 / 부정=-10
+  합계         최대 100점
 
 캐시 갱신 시점 (scheduler.py에서 호출):
-  - 장 전 (MARKET_OPEN 30분 전)
-  - 오후 1시
+  - 08:30 (장 전)
+  - 10:00
+  - 12:00
 """
 import json
 import os
@@ -34,27 +37,28 @@ REFRESH_TIMES = ["0830", "1000", "1200"]   # 캐시 갱신 시각 (HH:MM 없는 
 def technical_score(screening_result: dict) -> int:
     """
     screener.py check_volatility_breakout() 반환값 기반 기술적 점수
-    변동성 돌파 30 + AD Line 30 + 캔들 ±10 = 최대 70점
+    변동성 돌파 최대30 + AD Line 25 + 해머 +10 + strong_bull +15 = 최대 80점
+    (LLM/DART 합산 시 최대 100점)
     """
     score = 0
 
     # 변동성 돌파 (최대 30점)
     if screening_result.get("변동성돌파"):
         gap   = screening_result.get("돌파여유율", 0)
-        # gap 0%→30점, 1%→20점, MAX_BREAKOUT_GAP%→0점 선형 감소
         ratio = max(0.0, 1.0 - gap / max(sc.MAX_BREAKOUT_GAP, 0.01))
         score += int(30 * ratio)
 
-    # AD Line (30점)
+    # AD Line (25점)
     if screening_result.get("AD상승"):
-        score += 30
+        score += 25
 
-    # 캔들 패턴 (±10점)
-    pattern = screening_result.get("패턴")
-    if pattern == "hammer":
+    # 캔들 패턴: 해머 +10 / 행잉맨 패널티 없음
+    if screening_result.get("패턴") == "hammer":
         score += 10
-    elif pattern == "hanging_man":
-        score -= 10
+
+    # 60분봉 강한 양봉 (15점)
+    if screening_result.get("시간봉패턴") == "strong_bull":
+        score += 15
 
     return score
 
@@ -78,7 +82,8 @@ def total_score(screening_result: dict) -> dict:
     cache = _load_cache()
 
     stock_cache = cache.get("stocks", {}).get(code, {})
-    llm_score   = stock_cache.get("llm_score",  10)   # 캐시 없으면 중립
+    llm_raw     = stock_cache.get("llm_score",  10)   # 캐시 없으면 중립(10)
+    llm_score   = llm_raw // 2                         # bullish=10, neutral=5, bearish=0
     dart_score  = stock_cache.get("dart_score",  0)
 
     total = tech + llm_score + dart_score

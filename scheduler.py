@@ -87,10 +87,9 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
         quantity  = 0
         peak_price = 0
 
-    breakout_seen        = False
-    error_count          = 0    # 연속 에러 횟수
-    MAX_ERRORS           = 10   # 이 횟수 초과 시 강제 청산
-    holding_check_counter = 0   # HTS 수동매도 감지용 카운터
+    breakout_seen = False
+    error_count   = 0    # 연속 에러 횟수
+    MAX_ERRORS    = 10   # 이 횟수 초과 시 강제 청산
 
     print(f"\n[{get_now()}] {tag} 매수 대기 중...")
 
@@ -148,27 +147,28 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
             current_price = get_current_price(stock_code)["현재가"]
             error_count = 0  # 성공 시 에러 카운터 리셋
 
-            # ── HTS 수동매도 감지: 5루프(약 100초)마다 실제 잔고 확인 ──
+            # ── HTS 수동매도 감지: 매 루프마다 실제 잔고 확인 ──
+            # 잔고 조회 오류는 error_count에 영향 없이 별도 처리
             if bought:
-                holding_check_counter += 1
-                if holding_check_counter % 5 == 0:
-                    try:
-                        from order import get_holding_quantity
-                        actual_qty = get_holding_quantity(stock_code)
-                        if actual_qty == 0:
-                            print(f"\n[{get_now()}] {tag} 📤 잔고 0 감지 — HTS 수동매도 처리")
-                            tlog.log_sell(stock_code, stock_name, buy_price, 0,
-                                          quantity, "HTS수동매도", slot_no)
-                            try:
-                                from telegram_alarm import notify_sell_filled
-                                notify_sell_filled(stock_name, buy_price, 0, quantity, "HTS수동매도")
-                            except Exception:
-                                pass
-                            if on_close:
-                                on_close("HTS수동매도", stock_code)
-                            return
-                    except Exception:
-                        pass  # 잔고 조회 실패 시 무시하고 기존 로직 계속
+                try:
+                    from order import get_holding_quantity
+                    actual_qty = get_holding_quantity(stock_code)
+                    if actual_qty == 0:
+                        sell_p = current_price  # 현재가로 기록 (이미 조회됨)
+                        print(f"\n[{get_now()}] {tag} 📤 잔고 0 감지 — HTS 수동매도 처리")
+                        tlog.log_sell(stock_code, stock_name, buy_price, sell_p,
+                                      quantity, "HTS수동매도", slot_no)
+                        try:
+                            from telegram_alarm import notify_sell_filled
+                            notify_sell_filled(stock_name, buy_price, sell_p,
+                                               quantity, "HTS수동매도")
+                        except Exception:
+                            pass
+                        if on_close:
+                            on_close("HTS수동매도", stock_code)
+                        return
+                except Exception:
+                    pass  # 잔고 조회 실패 시 무시, error_count 증가 없음
 
             if not bought:
                 if current_price >= target_price:
