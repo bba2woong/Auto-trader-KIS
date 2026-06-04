@@ -956,13 +956,29 @@ with tab_backtest:
 # ══════════════════════════════════════════
 with tab_log:
     st.subheader("매매 로그")
-    from trading_logger import load_log, list_log_dates
+    from trading_logger import load_log, list_log_dates, delete_log_dates, save_log_events
 
     log_dates = list_log_dates()
 
     if not log_dates:
         st.info("저장된 매매 로그가 없습니다. 실투/모의투자를 실행하면 자동으로 기록됩니다.")
     else:
+        # ── 날짜별 관리 (다중 삭제) ──
+        with st.expander("🗑 날짜별 로그 삭제", expanded=False):
+            st.caption("삭제할 날짜를 선택하세요. 선택한 날짜의 전체 로그가 삭제됩니다.")
+            dates_to_delete = st.multiselect(
+                "삭제할 날짜",
+                options=log_dates,
+                format_func=lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]}",
+                key="del_dates"
+            )
+            if dates_to_delete:
+                if st.button(f"🗑 선택한 {len(dates_to_delete)}개 날짜 삭제",
+                             type="primary", key="btn_del_dates"):
+                    delete_log_dates(dates_to_delete)
+                    st.success(f"{len(dates_to_delete)}개 날짜 삭제 완료")
+                    st.rerun()
+
         sel_date = st.selectbox("날짜 선택", log_dates,
                                 format_func=lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]} ({d})")
 
@@ -1044,8 +1060,8 @@ with tab_log:
                     "daily_summary":    "📊 일별요약",
                 }
                 rows = []
-                for e in events:
-                    label = event_label.get(e["event"], e["event"])
+                for i, e in enumerate(events):
+                    label  = event_label.get(e["event"], e["event"])
                     detail = ""
                     if e["event"] == "buy_executed":
                         detail = f"{e['name']} {e['buy_price']:,}원 × {e['quantity']}주"
@@ -1055,8 +1071,28 @@ with tab_log:
                         detail = f"{e['name']} {e.get('score',0)}점"
                     elif e["event"] == "screening_result":
                         detail = f"{len(e.get('candidates',[]))}개 후보"
-                    rows.append({"시각": e.get("ts",""), "이벤트": label, "내용": detail})
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    rows.append({"_idx": i, "삭제": False,
+                                 "시각": e.get("ts",""), "이벤트": label, "내용": detail})
+
+                if rows:
+                    edit_df = pd.DataFrame(rows)
+                    edited  = st.data_editor(
+                        edit_df.drop(columns=["_idx"]),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={"삭제": st.column_config.CheckboxColumn("삭제", width="small")},
+                        disabled=["시각","이벤트","내용"],
+                        key=f"log_editor_{sel_date}",
+                    )
+                    del_indices = edited.index[edited["삭제"] == True].tolist()
+                    if del_indices:
+                        if st.button(f"🗑 선택한 {len(del_indices)}개 행 삭제",
+                                     key="btn_del_rows"):
+                            remaining = [e for i, e in enumerate(events)
+                                         if i not in del_indices]
+                            save_log_events(sel_date, remaining)
+                            st.success(f"{len(del_indices)}개 행 삭제 완료")
+                            st.rerun()
 
 
 # ══════════════════════════════════════════

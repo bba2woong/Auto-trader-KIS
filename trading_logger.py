@@ -162,3 +162,23 @@ def list_log_dates() -> list:
     """로그가 있는 날짜 목록 반환 (최신순)"""
     files = sorted(LOG_DIR.glob("*.jsonl"), reverse=True)
     return [f.stem for f in files]
+
+
+def delete_log_dates(date_list: list):
+    """날짜 목록에 해당하는 로그 파일 삭제"""
+    for d in date_list:
+        p = _log_path(d)
+        if p.exists():
+            p.unlink()
+
+
+def save_log_events(date_str: str, events: list):
+    """이벤트 리스트를 날짜 파일에 덮어쓰기 (행 삭제 후 저장용)"""
+    path = _log_path(date_str)
+    if not events:
+        if path.exists():
+            path.unlink()   # 이벤트 없으면 파일 삭제
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        for ev in events:
+            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
