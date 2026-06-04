@@ -807,15 +807,15 @@ with tab_backtest:
         prog_text = st.empty()
         try:
             if bt_type == "intraday":
-                # 단타: 로그 기반 or 폴백
-                if pool_option == "log_based" and 'stock_list_for_bt' in dir():
-                    if not selected_codes:
-                        st.error("종목을 1개 이상 선택하세요.")
-                        st.stop()
-                    stock_list = stock_list_for_bt
+                # 단타: 로그 기반 or 표준 풀 폴백
+                has_log = pool_option == "log_based" and bool(selected_codes)
+                if has_log:
+                    stock_list     = stock_list_for_bt
+                    budget_per_pos = initial_capital / st.session_state.get("bt_n_positions", sc.MAX_POSITIONS)
                 else:
-                    stock_list = _build_stock_list_ui("kospi", "")
-                budget_per_pos = initial_capital / st.session_state.get("bt_n_positions", sc.MAX_POSITIONS)
+                    # 로그 없거나 종목 미선택 → 표준 코스피+코스닥 풀
+                    stock_list     = _build_stock_list_ui("kospi", "")
+                    budget_per_pos = initial_capital * sc.INVEST_RATIO / sc.MAX_POSITIONS
             else:
                 stock_list     = _build_stock_list_ui(pool_option, custom_codes)
                 budget_per_pos = initial_capital * sc.INVEST_RATIO / sc.MAX_POSITIONS
