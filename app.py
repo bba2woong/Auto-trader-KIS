@@ -412,7 +412,7 @@ with tab_backtest:
             st.markdown("##### 💰 포지션 예산 설정")
             n_positions = st.number_input(
                 "포지션 수 (당일 실제 매수 기준 자동입력, 수정 가능)",
-                min_value=1, max_value=20,
+                min_value=1,
                 value=max(actual_pos_count, len(selected_codes)),
                 key="bt_n_positions"
             )
