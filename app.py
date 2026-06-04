@@ -425,7 +425,14 @@ with tab_trade:
     # ── 실시간 로그 (st.fragment으로 자동 갱신) ──
     @st.fragment(run_every=3)
     def _trade_log_fragment():
-        # 단일 상태 줄
+        # 스레드 종료 감지 → 전체 페이지 리런으로 상태 동기화
+        _t = st.session_state.get("trader_thread")
+        _r = st.session_state.get("trader_running", False)
+        if _r and _t and not _t.is_alive():
+            st.session_state["trader_running"] = False
+            st.rerun()          # 전체 재렌더링으로 메트릭 갱신
+
+        # 상태 줄 (반복성)
         status = _log_buf.get_status()
         st.caption(f"📡 {status}" if status else "📡 대기 중...")
 
@@ -437,7 +444,7 @@ with tab_trade:
                 _log_buf.clear()
         with col_log:
             if history:
-                st.code("\n".join(reversed(history[-50:])),  # 최신 50줄, 최신이 위
+                st.code("\n".join(reversed(history[-50:])),
                         language=None)
             else:
                 st.info("중요 이벤트가 여기에 표시됩니다.")
