@@ -87,8 +87,12 @@ class _LogCapture:
     def isatty(self): return False
 
 
-# 모듈 레벨 전역 버퍼 (스레드 간 공유)
-_log_buf = _LogBuffer()
+# 모듈 레벨 전역 버퍼
+# sys.modules에 저장 → Streamlit 리런 시 재생성 방지 (스레드와 공유)
+_LOG_BUF_KEY = "_kis_trader_log_buf"
+if _LOG_BUF_KEY not in sys.modules:
+    sys.modules[_LOG_BUF_KEY] = _LogBuffer()
+_log_buf: _LogBuffer = sys.modules[_LOG_BUF_KEY]
 
 
 # ──────────────────────────────────────────
