@@ -37,6 +37,9 @@ with st.sidebar:
         format_func=lambda x: "🟡 모의투자" if x == "mock" else "🔴 실전투자",
     )
     os.environ["TRADING_MODE"] = trading_mode
+    import config as _cfg_mod
+    if _cfg_mod.MODE != trading_mode:
+        _cfg_mod.reload(trading_mode)
 
     st.divider()
     st.subheader("전략 파라미터")
@@ -478,8 +481,18 @@ with tab_backtest:
                                 combo_i += 1
                                 prog_bar.progress(combo_i / total_combos)
                                 prog_text.caption(f"⚙️ 조합 계산 중 ({combo_i}/{total_combos})  K={kv} 손절={lv}% 트레일={tv}%")
-                                sc.K = kv; sc.LOSS_RATE = lv/100; sc.TRAILING_STOP_RATE = tv/100
-                                r = run_intraday_backtest(minute_data, daily_data, stock_list, actual_date, initial_capital)
+                                # sc 전역 수정 없이 params 딕셔너리로 전달
+                                grid_params = {
+                                    "K": kv, "LOSS_RATE": lv/100,
+                                    "TRAILING_STOP_RATE": tv/100,
+                                    "TRAILING_STOP_ACTIVATE_RATE": sc.TRAILING_STOP_ACTIVATE_RATE,
+                                    "USE_TRAILING_STOP": sc.USE_TRAILING_STOP,
+                                    "PROFIT_RATE": sc.PROFIT_RATE,
+                                    "INVEST_RATIO": sc.INVEST_RATIO,
+                                    "MAX_TRADES_PER_DAY": sc.MAX_TRADES_PER_DAY,
+                                }
+                                r = run_intraday_backtest(minute_data, daily_data, stock_list,
+                                                          actual_date, initial_capital, params=grid_params)
                                 ret, n_tr, wr, mdd = _calc_summary(r)
                                 grid_rows.append({"K":kv,"손절(%)":lv,"트레일(%)":tv,
                                                   "수익률(%)":round(ret,2),"거래수":n_tr,
@@ -488,15 +501,22 @@ with tab_backtest:
                                            "date":actual_date,"K":kv,"loss_pct":lv,"trail_pct":tv,
                                            "initial_capital":initial_capital,"return_pct":round(ret,2),
                                            "trades":n_tr,"win_rate":round(wr,1),"mdd":round(mdd,2)})
-                    # 원래 파라미터 복원
-                    sc.K = k; sc.LOSS_RATE = loss_rate; sc.TRAILING_STOP_RATE = trailing_rate
                     prog_bar.progress(1.0); prog_text.caption(f"✅ {total_combos}개 조합 완료!")
                     st.session_state["bt_grid"]   = grid_rows
                     st.session_state.pop("bt_result", None)
                 else:
-                    sc.K = sv_k; sc.LOSS_RATE = sv_ls/100; sc.TRAILING_STOP_RATE = sv_tr/100
                     prog_text.caption("⚙️ 계산 중...")
-                    result = run_intraday_backtest(minute_data, daily_data, stock_list, actual_date, initial_capital)
+                    single_params = {
+                        "K": sv_k, "LOSS_RATE": sv_ls/100,
+                        "TRAILING_STOP_RATE": sv_tr/100,
+                        "TRAILING_STOP_ACTIVATE_RATE": sc.TRAILING_STOP_ACTIVATE_RATE,
+                        "USE_TRAILING_STOP": sc.USE_TRAILING_STOP,
+                        "PROFIT_RATE": sc.PROFIT_RATE,
+                        "INVEST_RATIO": sc.INVEST_RATIO,
+                        "MAX_TRADES_PER_DAY": sc.MAX_TRADES_PER_DAY,
+                    }
+                    result = run_intraday_backtest(minute_data, daily_data, stock_list,
+                                                   actual_date, initial_capital, params=single_params)
                     prog_bar.progress(1.0); prog_text.caption("✅ 완료!")
                     st.session_state["bt_result"] = result
                     st.session_state.pop("bt_grid", None)

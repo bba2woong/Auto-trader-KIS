@@ -1,6 +1,7 @@
 # 환경변수 / 인증
 .env
 token_cache.json
+.cache/
 
 # Python
 venv/

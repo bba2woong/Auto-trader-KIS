@@ -439,8 +439,8 @@ def run_scheduler():
                     if pm.free_slots <= 0:
                         break
                     slot_counter += 1
-                pm.open(stock, slot_counter)
-                time.sleep(1)  # 동시 API 호출 간격
+                    pm.open(stock, slot_counter)
+                    time.sleep(1)
 
     # 기존 포지션 스레드 종료 대기
     print(f"\n[{get_now()}] 모든 포지션 종료 대기 중...")

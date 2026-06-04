@@ -17,17 +17,33 @@ SCAN_START  = "093000"   # 스크리닝 시작 (장 개시 후 30분)
 FORCE_SELL  = "152000"   # 강제 청산
 
 
-def run_intraday_backtest(minute_data, daily_data, stock_list, date, initial_capital=1_000_000):
+def run_intraday_backtest(minute_data, daily_data, stock_list, date,
+                          initial_capital=1_000_000, params=None):
     """
     minute_data : {code: [{"time","open","high","low","close","volume"}, ...]}  시간 오름차순
     daily_data  : {code: {date: ohlcv_row}}  일봉 (전일 데이터 포함)
     stock_list  : [{"code","name"}, ...]
     date        : "YYYYMMDD"
+    params      : {"K", "LOSS_RATE", "TRAILING_STOP_RATE", "INVEST_RATIO", ...}
+                  None이면 strategy_config 전역값 사용.
+                  그리드 서치 시 전역값 오염 방지를 위해 params를 전달.
 
     반환: {"trades", "equity_curve", "final_capital", "initial_capital", "timeline"}
     """
+    # params가 없으면 현재 sc 값으로 스냅샷 (전역 변경에 영향 안 받도록)
+    if params is None:
+        params = {
+            "K":                    sc.K,
+            "LOSS_RATE":            sc.LOSS_RATE,
+            "TRAILING_STOP_RATE":   sc.TRAILING_STOP_RATE,
+            "TRAILING_STOP_ACTIVATE_RATE": sc.TRAILING_STOP_ACTIVATE_RATE,
+            "USE_TRAILING_STOP":    sc.USE_TRAILING_STOP,
+            "PROFIT_RATE":          sc.PROFIT_RATE,
+            "INVEST_RATIO":         sc.INVEST_RATIO,
+            "MAX_TRADES_PER_DAY":   sc.MAX_TRADES_PER_DAY,
+        }
     # ── 목표가 / AD 상승 여부 사전 계산 ──
-    candidates = _build_candidates(minute_data, daily_data, stock_list, date)
+    candidates = _build_candidates(minute_data, daily_data, stock_list, date, params)
     if not candidates:
         return _empty_result(initial_capital)
 
@@ -70,12 +86,13 @@ def run_intraday_backtest(minute_data, daily_data, stock_list, date, initial_cap
             if bar["high"] > peak_price:
                 peak_price = bar["high"]
 
-            reason, sell_p = _check_exit(bar, holding["buy_price"], peak_price, trail_active)
+            p = holding["params"]
+            reason, sell_p = _check_exit(bar, holding["buy_price"], peak_price, trail_active, p)
 
             # 트레일링 활성화 체크
             if not trail_active:
                 peak_rate = (peak_price - holding["buy_price"]) / holding["buy_price"]
-                if peak_rate >= sc.TRAILING_STOP_ACTIVATE_RATE:
+                if peak_rate >= p["TRAILING_STOP_ACTIVATE_RATE"]:
                     trail_active = True
 
             if reason:
@@ -115,7 +132,8 @@ def run_intraday_backtest(minute_data, daily_data, stock_list, date, initial_cap
                 if quantity < 1:
                     continue
 
-                holding      = {**cand, "buy_price": buy_p, "quantity": quantity, "entry_time": t}
+                holding      = {**cand, "buy_price": buy_p, "quantity": quantity,
+                               "entry_time": t, "params": params}
                 peak_price   = buy_p
                 trail_active = False
                 traded_codes.add(code)
@@ -146,7 +164,7 @@ def run_intraday_backtest(minute_data, daily_data, stock_list, date, initial_cap
 # 내부 헬퍼
 # ──────────────────────────────────────────
 
-def _build_candidates(minute_data, daily_data, stock_list, date):
+def _build_candidates(minute_data, daily_data, stock_list, date, params):
     """
     목표가 + AD상승 기준으로 후보 종목 목록 생성.
     오늘 시가는 분봉 첫 번째 봉의 open 사용.
@@ -175,7 +193,7 @@ def _build_candidates(minute_data, daily_data, stock_list, date):
         prev_range = prev["high"] - prev["low"]
         if prev_range == 0:
             continue
-        target = today_open + prev_range * sc.K
+        target = today_open + prev_range * params["K"]
 
         # AD Line 상승 여부 (일봉 기준)
         window = [dmap[d] for d in dates[max(0, idx - 4): idx + 1]]
@@ -193,23 +211,22 @@ def _build_candidates(minute_data, daily_data, stock_list, date):
     return result
 
 
-def _check_exit(bar, buy_price, peak_price, trail_active):
+def _check_exit(bar, buy_price, peak_price, trail_active, params):
     """
-    현재 분봉 기준 청산 조건 체크
+    현재 분봉 기준 청산 조건 체크 (params로 전역 오염 방지)
     반환: (reason, sell_price) or (None, None)
     """
-    # 하드 손절
-    stop_loss = buy_price * (1 - sc.LOSS_RATE)
+    stop_loss = buy_price * (1 - params["LOSS_RATE"])
     if bar["low"] <= stop_loss:
         return "손절", int(stop_loss)
 
-    if sc.USE_TRAILING_STOP:
+    if params["USE_TRAILING_STOP"]:
         if trail_active:
-            trailing_stop = peak_price * (1 - sc.TRAILING_STOP_RATE)
+            trailing_stop = peak_price * (1 - params["TRAILING_STOP_RATE"])
             if bar["low"] <= trailing_stop:
                 return "트레일링스탑", int(trailing_stop)
     else:
-        profit_target = buy_price * (1 + sc.PROFIT_RATE)
+        profit_target = buy_price * (1 + params["PROFIT_RATE"])
         if bar["high"] >= profit_target:
             return "익절", int(profit_target)
 
