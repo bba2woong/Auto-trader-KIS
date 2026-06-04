@@ -13,6 +13,113 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import threading
+
+# ──────────────────────────────────────────
+# 로그 캡처 (scheduler print → 화면 출력)
+# ──────────────────────────────────────────
+
+class _LogBuffer:
+    """스레드 안전 로그 버퍼 (전역 공유)"""
+    REPEAT_KW    = ["[Auth]", "대기 중", "스크리닝까지", "수집 중",
+                    "캐시된 토큰", "포지션 풀"]
+    IMPORTANT_KW = ["매수", "매도", "손절", "트레일링", "스크리닝 완료",
+                    "스크리닝 시작", "포지션 오픈", "포지션 종료",
+                    "강제 청산", "자동 매수", "오류", "실패", "경고",
+                    "장 시작", "장 종료", "HTS수동매도"]
+
+    def __init__(self):
+        self._lock   = threading.Lock()
+        self.status  = ""
+        self.history = []
+
+    def update_status(self, msg):
+        with self._lock:
+            self.status = msg.rstrip()
+
+    def add_history(self, msg):
+        with self._lock:
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.history.append(f"[{ts}] {msg.rstrip()}")
+            if len(self.history) > 200:
+                self.history = self.history[-200:]
+
+    def get_status(self):
+        with self._lock: return self.status
+
+    def get_history(self):
+        with self._lock: return list(self.history)
+
+    def clear(self):
+        with self._lock:
+            self.status  = ""
+            self.history = []
+
+
+class _LogCapture:
+    """sys.stdout 가로채기 — 반복성/중요 이벤트 분류"""
+    def __init__(self, original, buf: _LogBuffer):
+        self.original = original
+        self.buf      = buf
+        self._line    = ""
+
+    def write(self, msg):
+        self.original.write(msg)
+        text   = self._line + msg
+        lines  = text.split("\n")
+        self._line = lines[-1]
+        for line in lines[:-1]:
+            self._route(line)
+
+    def _route(self, line):
+        s = line.strip()
+        if not s:
+            return
+        is_repeat = (
+            any(k in s for k in self.buf.REPEAT_KW) or "\r" in s
+        )
+        if is_repeat:
+            self.buf.update_status(s)
+        elif any(k in s for k in self.buf.IMPORTANT_KW):
+            self.buf.add_history(s)
+
+    def flush(self):  self.original.flush()
+    def isatty(self): return False
+
+
+# 모듈 레벨 전역 버퍼 (스레드 간 공유)
+_log_buf = _LogBuffer()
+
+
+# ──────────────────────────────────────────
+# 트레이딩 시작/정지 헬퍼
+# ──────────────────────────────────────────
+
+def _start_scheduler(mode: str):
+    """config 재로드 → sys.stdout 교체 → scheduler 백그라운드 실행"""
+    import config as cfg
+    cfg.reload(mode)
+    os.environ["TRADING_MODE"] = mode
+
+    _log_buf.clear()
+    capture = _LogCapture(sys.stdout, _log_buf)
+    sys.stdout = capture
+
+    def _run():
+        try:
+            from scheduler import run_scheduler
+            run_scheduler()
+        except Exception as e:
+            _log_buf.add_history(f"⚠️ 스케줄러 오류: {e}")
+        finally:
+            sys.stdout = capture.original
+            st.session_state["trader_running"] = False
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    st.session_state["trader_thread"]  = t
+    st.session_state["trader_running"] = True
+    st.session_state["trader_mode"]    = mode
 
 # ──────────────────────────────────────────
 # 페이지 설정
@@ -96,7 +203,9 @@ with st.sidebar:
 # ──────────────────────────────────────────
 # 탭
 # ──────────────────────────────────────────
-tab_screen, tab_backtest, tab_log, tab_config = st.tabs(["🔍 스크리닝", "📊 백테스팅", "📋 매매 로그", "⚙️ 파라미터 현황"])
+tab_screen, tab_trade, tab_backtest, tab_log, tab_config = st.tabs(
+    ["🔍 스크리닝", "🚀 트레이딩", "📊 백테스팅", "📋 매매 로그", "⚙️ 파라미터 현황"]
+)
 
 
 # ══════════════════════════════════════════
@@ -225,7 +334,101 @@ with tab_screen:
 
 
 # ══════════════════════════════════════════
-# 탭 2: 백테스팅
+# 탭 2: 트레이딩
+# ══════════════════════════════════════════
+with tab_trade:
+    st.subheader("🚀 트레이딩")
+
+    running  = st.session_state.get("trader_running", False)
+    t_mode   = st.session_state.get("trader_mode", "—")
+    t_thread = st.session_state.get("trader_thread")
+
+    # 스레드가 죽었으면 상태 정리
+    if running and t_thread and not t_thread.is_alive():
+        st.session_state["trader_running"] = False
+        running = False
+
+    # ── 상태 표시 ──
+    c1, c2, c3 = st.columns(3)
+    c1.metric("실행 상태",   "🟢 실행 중" if running else "⚫ 정지 중")
+    c2.metric("모드",        "🟡 모의투자" if t_mode == "mock"
+                             else "🔴 실전투자" if t_mode == "real" else "—")
+    c3.metric("당일 매매",   f"{st.session_state.get('trade_count', 0)}회")
+
+    st.divider()
+
+    # ── 실전투자 확인 체크박스 ──
+    real_ok = st.checkbox(
+        "⚠️ 실전투자임을 확인합니다. 실제 자금이 사용됩니다.",
+        key="real_confirm"
+    )
+
+    # ── 버튼 ──
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        if st.button("▶ 모의투자 시작", type="primary",
+                     use_container_width=True, disabled=running):
+            import config as _cfg
+            _cfg.reload("mock")
+            os.environ["TRADING_MODE"] = "mock"
+            _start_scheduler("mock")
+            st.rerun()
+
+    with b2:
+        real_btn_disabled = running or not real_ok
+        if st.button("▶ 실전투자 시작",
+                     use_container_width=True,
+                     disabled=real_btn_disabled,
+                     type="secondary"):
+            st.warning("⚠️ 실전투자를 시작합니다. 실제 돈이 사용됩니다.")
+            import config as _cfg
+            _cfg.reload("real")
+            os.environ["TRADING_MODE"] = "real"
+            _start_scheduler("real")
+            st.rerun()
+
+    with b3:
+        if st.button("⏹ 정지", use_container_width=True, disabled=not running):
+            st.session_state["trader_running"] = False
+            _log_buf.add_history("⏹ 정지 요청 — 현재 포지션 청산 후 종료됩니다.")
+
+    if not running and t_mode != "—":
+        st.info("정지 요청됨 — 현재 포지션 청산 후 종료됩니다.")
+
+    st.divider()
+
+    # ── 현재 config 확인 ──
+    import config as _cfg_check
+    st.caption(
+        f"🔑 현재 API 모드: **{_cfg_check.MODE.upper()}**  |  "
+        f"Base URL: `{_cfg_check.BASE_URL}`"
+    )
+
+    # ── 실시간 로그 (st.fragment으로 자동 갱신) ──
+    @st.fragment(run_every=3)
+    def _trade_log_fragment():
+        # 단일 상태 줄
+        status = _log_buf.get_status()
+        st.caption(f"📡 {status}" if status else "📡 대기 중...")
+
+        # 중요 이벤트 누적 로그
+        history = _log_buf.get_history()
+        col_log, col_clear = st.columns([5, 1])
+        with col_clear:
+            if st.button("🗑 로그 지우기", key="clear_log"):
+                _log_buf.clear()
+        with col_log:
+            if history:
+                st.code("\n".join(reversed(history[-50:])),  # 최신 50줄, 최신이 위
+                        language=None)
+            else:
+                st.info("중요 이벤트가 여기에 표시됩니다.")
+
+    _trade_log_fragment()
+
+
+# ══════════════════════════════════════════
+# 탭 3: 백테스팅
 # ══════════════════════════════════════════
 import numpy as np
 import json
