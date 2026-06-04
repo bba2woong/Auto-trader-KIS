@@ -107,6 +107,20 @@ def _start_scheduler(mode: str):
 
     def _run():
         try:
+            import time as _time
+            import strategy_config as _sc
+            now_str = datetime.now().strftime("%H:%M")
+
+            # 장외 시간 체크 (MARKET_OPEN 이전 or MARKET_CLOSE 이후)
+            if now_str >= _sc.MARKET_CLOSE or now_str < "08:00":
+                _log_buf.add_history(
+                    f"⛔ 장외 시간입니다 (현재 {now_str}) — "
+                    f"장 운영: {_sc.MARKET_OPEN} ~ {_sc.MARKET_CLOSE}"
+                )
+                _time.sleep(1.5)
+                st.session_state["trader_running"] = False
+                return
+
             from scheduler import run_scheduler
             run_scheduler()
         except Exception as e:
