@@ -369,6 +369,67 @@ with tab_backtest:
     # ── 파라미터 범위 설정 (단타 전용) ──
     if bt_type == "intraday":
         st.divider()
+
+        # ── 매매 로그에서 당일 스크리닝 후보 불러오기 ──
+        date_str = bt_date.strftime("%Y%m%d")
+        from trading_logger import load_log
+
+        log_events   = load_log(date_str)
+        screen_events = [e for e in log_events if e["event"] == "screening_result"]
+
+        if screen_events:
+            # 스크리닝 후보 종목 추출 (중복 제거, AI점수 높은 것 유지)
+            cand_map = {}
+            for evt in screen_events:
+                for c in evt.get("candidates", []):
+                    code = c["code"]
+                    if code not in cand_map or c.get("score", 0) > cand_map[code].get("score", 0):
+                        cand_map[code] = c
+
+            st.markdown(f"##### 📋 당일 스크리닝 후보 종목 ({date_str}, {len(cand_map)}개)")
+
+            # 실제 매수 종목 표시
+            bought_codes = {e["code"] for e in log_events if e["event"] == "buy_executed"}
+
+            # 종목 선택 체크박스
+            selected_codes = []
+            cols = st.columns(2)
+            for i, (code, c) in enumerate(cand_map.items()):
+                ai_score = c.get("score", "—")
+                grade    = c.get("grade", "")
+                bought   = "✅ 매수됨" if code in bought_codes else ""
+                label    = f"{c['name']} ({code})  AI:{ai_score}점  {grade}  {bought}"
+                default  = True  # 기본 전체 선택
+                if cols[i % 2].checkbox(label, value=default, key=f"bt_cand_{code}"):
+                    selected_codes.append(code)
+
+            if not selected_codes:
+                st.warning("최소 1개 이상 선택하세요.")
+
+            # 실제 포지션 수 / 포지션당 예산
+            actual_pos_count = len(bought_codes) if bought_codes else sc.MAX_POSITIONS
+            st.divider()
+            st.markdown("##### 💰 포지션 예산 설정")
+            n_positions = st.number_input(
+                "포지션 수 (당일 실제 매수 기준 자동입력, 수정 가능)",
+                min_value=1, max_value=20,
+                value=max(actual_pos_count, len(selected_codes)),
+                key="bt_n_positions"
+            )
+            budget_per_pos = initial_capital / n_positions
+            st.caption(f"포지션당 예산: **{budget_per_pos:,.0f}원**  =  초기자금 {initial_capital:,}원 ÷ {n_positions}개")
+
+            # 선택 종목 리스트 구성
+            stock_list_for_bt = [{"code": c, "name": cand_map[c]["name"]} for c in selected_codes]
+            pool_option = "log_based"   # 로그 기반 모드 플래그
+
+        else:
+            st.info(f"📋 {date_str} 매매 로그 없음 — 표준 종목 풀로 진행합니다.")
+            stock_list_for_bt = None
+            budget_per_pos    = initial_capital / sc.MAX_POSITIONS
+            n_positions       = sc.MAX_POSITIONS
+
+        st.divider()
         st.markdown("##### 📐 파라미터 범위 설정")
         st.caption("범위 체크 시 모든 조합을 캐시 데이터로 한번에 계산합니다.")
 
@@ -405,7 +466,7 @@ with tab_backtest:
         expected  = f"{date_str}_{pool_option}"
         if cache_key == expected:
             cached_n = len(st.session_state.get("bt_minute_data", {}))
-            st.success(f"✅ 캐시 사용 가능 — {date_str} / {cached_n}개 종목 로드됨  (데이터 재수집 불필요)")
+            st.success(f"✅ 캐시 사용 가능 — {date_str} / {cached_n}개 종목 로드됨")
         else:
             st.info("📥 캐시 없음 — 실행 시 데이터를 수집합니다.")
 
@@ -420,10 +481,23 @@ with tab_backtest:
             st.rerun()
 
     if run_btn:
+        # 로그 기반 단타: 선택 종목 확인
+        if bt_type == "intraday" and pool_option == "log_based":
+            if not selected_codes:
+                st.error("종목을 1개 이상 선택하세요.")
+                st.stop()
+            stock_list = stock_list_for_bt
+        else:
+            stock_list = None   # 아래에서 구성
+
         prog_bar  = st.progress(0)
         prog_text = st.empty()
         try:
-            stock_list = _build_stock_list_ui(pool_option, custom_codes)
+            if stock_list is None:
+                stock_list = _build_stock_list_ui(pool_option, custom_codes)
+            budget_per_pos = initial_capital / st.session_state.get("bt_n_positions", sc.MAX_POSITIONS) \
+                             if bt_type == "intraday" and pool_option == "log_based" \
+                             else initial_capital * sc.INVEST_RATIO / sc.MAX_POSITIONS
 
             if bt_type == "daily":
                 sd = start_date.strftime("%Y%m%d")
@@ -490,6 +564,7 @@ with tab_backtest:
                                     "PROFIT_RATE": sc.PROFIT_RATE,
                                     "INVEST_RATIO": sc.INVEST_RATIO,
                                     "MAX_TRADES_PER_DAY": sc.MAX_TRADES_PER_DAY,
+                                    "budget_per_position": budget_per_pos,
                                 }
                                 r = run_intraday_backtest(minute_data, daily_data, stock_list,
                                                           actual_date, initial_capital, params=grid_params)
@@ -514,6 +589,7 @@ with tab_backtest:
                         "PROFIT_RATE": sc.PROFIT_RATE,
                         "INVEST_RATIO": sc.INVEST_RATIO,
                         "MAX_TRADES_PER_DAY": sc.MAX_TRADES_PER_DAY,
+                        "budget_per_position": budget_per_pos,
                     }
                     result = run_intraday_backtest(minute_data, daily_data, stock_list,
                                                    actual_date, initial_capital, params=single_params)

@@ -127,8 +127,12 @@ def run_intraday_backtest(minute_data, daily_data, stock_list, date,
 
             # 현재 분봉 종가가 목표가 이상 → 매수 신호
             if bar["close"] >= cand["target"]:
-                buy_p    = cand["target"]
-                quantity = int(capital * params["INVEST_RATIO"] / buy_p)
+                buy_p = cand["target"]
+                # budget_per_position 있으면 고정 예산, 없으면 잔여 자본 비율
+                if params.get("budget_per_position"):
+                    quantity = int(params["budget_per_position"] / buy_p)
+                else:
+                    quantity = int(capital * params["INVEST_RATIO"] / buy_p)
                 if quantity < 1:
                     continue
 
