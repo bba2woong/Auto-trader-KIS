@@ -109,20 +109,23 @@ def _start_scheduler(mode: str):
     capture = _LogCapture(sys.stdout, _log_buf)
     sys.stdout = capture
 
+    # 시작 전 정지 이벤트 초기화
+    from scheduler import _get_stop_event
+    _get_stop_event().clear()
+
     def _run():
         try:
             import time as _time
             import strategy_config as _sc
             now_str = datetime.now().strftime("%H:%M")
 
-            # 장외 시간 체크 (MARKET_OPEN 이전 or MARKET_CLOSE 이후)
+            # 장외 시간 체크
             if now_str >= _sc.MARKET_CLOSE or now_str < "08:00":
                 _log_buf.add_history(
                     f"⛔ 장외 시간입니다 (현재 {now_str}) — "
                     f"장 운영: {_sc.MARKET_OPEN} ~ {_sc.MARKET_CLOSE}"
                 )
                 _time.sleep(1.5)
-                st.session_state["trader_running"] = False
                 return
 
             from scheduler import run_scheduler
@@ -407,11 +410,16 @@ with tab_trade:
 
     with b3:
         if st.button("⏹ 정지", use_container_width=True, disabled=not running):
-            st.session_state["trader_running"] = False
-            _log_buf.add_history("⏹ 정지 요청 — 현재 포지션 청산 후 종료됩니다.")
+            from scheduler import _get_stop_event
+            _get_stop_event().set()
+            _log_buf.add_history(
+                "⏹ 정지 요청 — 모니터링 중단됩니다. "
+                "보유 포지션은 KIS 계좌에 그대로 유지됩니다. "
+                "재시작 시 KIS 잔고에서 자동 복구됩니다."
+            )
 
     if not running and t_mode != "—":
-        st.info("정지 요청됨 — 현재 포지션 청산 후 종료됩니다.")
+        st.info("⏹ 모니터링 정지됨 — 재시작 버튼을 누르면 KIS 잔고에서 포지션을 자동 복구합니다.")
 
     st.divider()
 

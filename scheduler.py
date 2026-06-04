@@ -530,8 +530,22 @@ def restore_positions(pm):
         print(f"  [복구] {restored}개 포지션 복구 완료")
 
 
+STOP_KEY = "_kis_scheduler_stop"   # sys.modules 정지 신호 키
+
+
+def _get_stop_event() -> threading.Event:
+    """앱과 공유하는 정지 이벤트 (sys.modules에 저장)"""
+    import sys as _sys
+    if STOP_KEY not in _sys.modules:
+        _sys.modules[STOP_KEY] = threading.Event()
+    return _sys.modules[STOP_KEY]
+
+
 def run_scheduler():
     """멀티 포지션 + 5분 주기 스케줄러 + AI 점수 기반 라우팅"""
+    stop_ev = _get_stop_event()
+    stop_ev.clear()   # 시작 시 초기화
+
     sc.print_config()
 
     use_telegram = _telegram_enabled()
@@ -569,6 +583,11 @@ def run_scheduler():
 
     while True:
         now_hhmm = datetime.now().strftime("%H:%M")
+
+        # 외부 정지 신호 (app.py 정지 버튼)
+        if stop_ev.is_set():
+            print(f"\n[{get_now()}] ⏹ 정지 요청 수신 — 모니터링 중단 (포지션 KIS 유지)")
+            break
 
         # 종료 조건
         if is_force_sell_time():
