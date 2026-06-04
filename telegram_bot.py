@@ -476,3 +476,118 @@ async def _send_text(message):
     bot = Bot(token=BOT_TOKEN)
     async with bot:
         await bot.send_message(chat_id=CHAT_ID, text=message)
+
+
+# ──────────────────────────────────────────
+# 텔레그램 수동 매수 모니터
+# 6자리 종목코드 텍스트 메시지 수신 → 즉시 매수
+# send_and_wait()와 충돌 없이 raw HTTP polling 사용
+# ──────────────────────────────────────────
+
+_manual_buy_counter = 0   # 수동 슬롯 번호용
+
+
+def start_manual_buy_monitor(pm, budget_per_slot, stop_event=None):
+    """
+    백그라운드 스레드로 텔레그램 메시지 폴링.
+    6자리 숫자 코드 수신 시 해당 종목 즉시 매수.
+    stop_event: scheduler의 정지 이벤트
+    """
+    if not BOT_TOKEN or not CHAT_ID:
+        return
+
+    def _loop():
+        import re, requests, time as _time
+        global _manual_buy_counter
+        api_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
+        offset  = 0
+
+        print("[텔레그램] 수동매수 모니터 시작 — 6자리 종목코드를 메시지로 보내면 즉시 매수")
+
+        while True:
+            if stop_event and stop_event.is_set():
+                break
+            try:
+                res = requests.get(
+                    f"{api_url}/getUpdates",
+                    params={
+                        "offset":           offset,
+                        "timeout":          5,
+                        "allowed_updates":  ["message"],
+                    },
+                    timeout=8,
+                )
+                if res.status_code != 200:
+                    _time.sleep(2)
+                    continue
+
+                for u in res.json().get("result", []):
+                    offset   = u["update_id"] + 1
+                    msg      = u.get("message", {})
+                    text     = msg.get("text", "").strip()
+                    chat_id  = str(msg.get("chat", {}).get("id", ""))
+
+                    # 본인 채팅방 메시지만 처리
+                    if chat_id != str(CHAT_ID):
+                        continue
+
+                    # 6자리 숫자 = 종목코드
+                    if re.match(r'^\d{6}$', text):
+                        _handle_manual_buy(text, pm, budget_per_slot)
+
+            except Exception:
+                pass
+            _time.sleep(2)
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    return t
+
+
+def _handle_manual_buy(stock_code: str, pm, budget_per_slot: float):
+    """텔레그램으로 요청받은 종목 즉시 매수"""
+    import time as _time
+    global _manual_buy_counter
+
+    # 종목명 찾기
+    try:
+        from screener import KOSPI_200
+        name_map = {s["code"]: s["name"] for s in KOSPI_200}
+    except Exception:
+        name_map = {}
+
+    try:
+        from watchlist import WATCHLIST_CODES
+    except Exception:
+        pass
+
+    name = name_map.get(stock_code, stock_code)
+
+    # 슬롯 확인
+    if pm.free_slots <= 0:
+        notify(f"⚠️ 수동매수 불가: {name}({stock_code})\n빈 슬롯 없음 (포지션 풀 가득)")
+        return
+
+    if pm.in_cooldown(stock_code):
+        notify(f"⚠️ 수동매수 불가: {name}({stock_code})\n쿨다운 중")
+        return
+
+    if stock_code in pm.active:
+        notify(f"⚠️ 수동매수 불가: {name}({stock_code})\n이미 보유 중")
+        return
+
+    _manual_buy_counter += 1
+    slot_no = 800 + _manual_buy_counter   # 수동 슬롯은 800번대로 구분
+
+    notify(
+        f"📱 수동매수 요청 접수\n"
+        f"종목: {name} ({stock_code})\n"
+        f"예산: {budget_per_slot:,.0f}원\n"
+        f"슬롯: #{slot_no} | 트레일링 스탑 적용"
+    )
+
+    pm.open(
+        {"code": stock_code, "name": f"[수동]{name}"},
+        slot_no,
+        jitter=False,
+    )

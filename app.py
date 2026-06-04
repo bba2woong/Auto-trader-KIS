@@ -119,14 +119,27 @@ def _start_scheduler(mode: str):
             import strategy_config as _sc
             now_str = datetime.now().strftime("%H:%M")
 
-            # 장외 시간 체크
-            if now_str >= _sc.MARKET_CLOSE or now_str < "08:00":
+            # 시간대별 처리
+            if now_str < "06:00":
                 _log_buf.add_history(
-                    f"⛔ 장외 시간입니다 (현재 {now_str}) — "
-                    f"장 운영: {_sc.MARKET_OPEN} ~ {_sc.MARKET_CLOSE}"
+                    f"⛔ 너무 이른 시간입니다 (현재 {now_str}). "
+                    f"06:00 이후에 시작하세요."
                 )
                 _time.sleep(1.5)
                 return
+            elif now_str >= _sc.MARKET_CLOSE:
+                _log_buf.add_history(
+                    f"⛔ 장 종료 후입니다 (현재 {now_str}, "
+                    f"장 운영: {_sc.MARKET_OPEN}~{_sc.MARKET_CLOSE})"
+                )
+                _time.sleep(1.5)
+                return
+            elif now_str < _sc.MARKET_OPEN:
+                # 06:00~09:00 → 대기 모드로 진행
+                _log_buf.add_history(
+                    f"🕐 장 시작 대기 모드 (현재 {now_str}) — "
+                    f"{_sc.MARKET_OPEN} 장 시작 시 자동 가동됩니다."
+                )
 
             from scheduler import run_scheduler
             run_scheduler()
