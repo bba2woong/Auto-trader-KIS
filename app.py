@@ -334,7 +334,8 @@ def _show_grid_result(grid_rows):
         use_container_width=True, hide_index=True,
     )
     best = df.iloc[0]
-    st.success(f"✅ 최적 조합 — K: {best['K']} | 손절: {best['손절(%)']}% | "
+    k_str = f"K: {best['K']} | " if 'K' in best.index else ""
+    st.success(f"✅ 최적 조합 — {k_str}손절: {best['손절(%)']}% | "
                f"트레일링: {best['트레일(%)']}% → 수익률 {best['수익률(%)']:+.2f}%")
 
 
