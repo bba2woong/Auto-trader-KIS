@@ -1,6 +1,7 @@
 import requests
 import json
 import os
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -9,10 +10,16 @@ _CACHE_DIR       = Path(__file__).parent / ".cache"
 _CACHE_DIR.mkdir(exist_ok=True)
 TOKEN_CACHE_FILE = str(_CACHE_DIR / "token_cache.json")
 
+_token_lock = threading.Lock()   # 멀티스레드 동시 접근 방지
+
 def get_access_token():
     import config
 
-    # 캐시된 토큰이 있으면 재사용
+    with _token_lock:
+        return _get_token(config)
+
+
+def _get_token(config):
     if os.path.exists(TOKEN_CACHE_FILE):
         with open(TOKEN_CACHE_FILE, "r") as f:
             cache = json.load(f)

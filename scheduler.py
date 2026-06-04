@@ -10,6 +10,7 @@ scheduler.py — 멀티 포지션 + 5분 주기 실시간 스크리닝 스케줄
 """
 import os
 import time
+import random
 import threading
 from datetime import datetime
 import strategy_config as sc
@@ -49,30 +50,42 @@ def _telegram_enabled():
 # 단일 종목 매매 루프 (스레드로 실행)
 # ──────────────────────────────────────────
 
-def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None):
+def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
+                     restore_buy_price=0, restore_quantity=0):
     """
     단일 종목 매매 루프. 스레드로 실행.
-    budget   : 포지션당 배정 예산 (원)
-    on_close : 청산 시 호출할 콜백 (result, stock_code)
+    budget             : 포지션당 배정 예산 (원)
+    on_close           : 청산 시 호출할 콜백 (result, stock_code)
+    restore_buy_price  : 재시작 복구 시 기존 매수가 (0이면 신규 진입 대기)
+    restore_quantity   : 재시작 복구 시 기존 보유 수량
     """
     tag = f"[슬롯{slot_no}] {stock_name}({stock_code})"
     print(f"\n{'='*44}")
-    print(f"  {tag} 진입 준비")
+    print(f"  {tag} {'복구 모니터링' if restore_buy_price else '진입 준비'}")
     print(f"  예산: {budget:,}원")
     print(f"{'='*44}")
 
-    try:
-        target_price = calc_target_price(stock_code)
-    except Exception as e:
-        print(f"\n{tag} 목표가 계산 실패: {e}")
-        if on_close:
-            on_close("오류", stock_code)
-        return
+    # 복구 모드: 이미 보유 중인 포지션 → 즉시 모니터링 시작
+    if restore_buy_price > 0:
+        bought    = True
+        buy_price = restore_buy_price
+        quantity  = restore_quantity
+        peak_price = restore_buy_price
+        target_price = 0
+        print(f"  {tag} ↩️ 복구: 매수가 {buy_price:,}원 × {quantity}주")
+    else:
+        try:
+            target_price = calc_target_price(stock_code)
+        except Exception as e:
+            print(f"\n{tag} 목표가 계산 실패: {e}")
+            if on_close:
+                on_close("오류", stock_code)
+            return
+        bought    = False
+        buy_price = 0
+        quantity  = 0
+        peak_price = 0
 
-    bought        = False
-    buy_price     = 0
-    quantity      = 0
-    peak_price    = 0
     breakout_seen = False
     error_count   = 0          # 연속 에러 횟수
     MAX_ERRORS    = 10         # 이 횟수 초과 시 강제 청산
@@ -224,14 +237,26 @@ class PositionManager:
         last = self.cooldown_map.get(code)
         return last and (time.time() - last) < sc.SAME_STOCK_COOLDOWN
 
-    def open(self, stock, slot_no):
-        """포지션 스레드 시작"""
-        code = stock["code"]
-        t = threading.Thread(
-            target=run_single_stock,
-            args=(code, stock["name"], slot_no, self.budget, self._on_close),
-            daemon=True,
-        )
+    def open(self, stock, slot_no, jitter=True):
+        """
+        포지션 스레드 시작.
+        jitter=True : 0~3초 랜덤 지연으로 동시 API 호출 분산
+        stock에 buy_price_hint, qty_hint가 있으면 복구 모드로 실행
+        """
+        code              = stock["code"]
+        restore_price     = stock.get("buy_price_hint", 0)
+        restore_qty       = stock.get("qty_hint", 0)
+
+        def _run_with_jitter():
+            if jitter:
+                time.sleep(random.uniform(0, 3))
+            run_single_stock(
+                code, stock["name"], slot_no, self.budget, self._on_close,
+                restore_buy_price=restore_price,
+                restore_quantity=restore_qty,
+            )
+
+        t = threading.Thread(target=_run_with_jitter, daemon=True)
         with self.lock:
             self.active[code] = t
             self.trade_count += 1
@@ -298,6 +323,54 @@ def _score_and_route(candidate):
     return score_dict, route
 
 
+def restore_positions(pm):
+    """
+    재시작 시 KIS 잔고 조회 → 기존 보유 종목을 포지션 스레드로 복구.
+    매수가는 평균단가(pchs_avg_pric)를 사용.
+    """
+    from api import get_balance
+    from screener import KOSPI_200
+    from watchlist import WATCHLIST_CODES
+
+    try:
+        holdings = get_balance()["보유종목"]
+    except Exception as e:
+        print(f"  [복구] 잔고 조회 실패: {e}")
+        return
+
+    if not holdings:
+        print(f"  [복구] 보유 종목 없음 — 새로 시작")
+        return
+
+    # 종목명 조회용 맵
+    name_map = {s["code"]: s["name"] for s in KOSPI_200}
+    for code in WATCHLIST_CODES:
+        if code not in name_map:
+            name_map[code] = code
+
+    restored = 0
+    for h in holdings:
+        code = h.get("pdno", "")
+        qty  = int(h.get("hldg_qty", 0))
+        if qty <= 0 or not code:
+            continue
+        name      = h.get("prdt_name") or name_map.get(code, code)
+        avg_price = int(float(h.get("pchs_avg_pric", 0)))
+        print(f"  [복구] {name} ({code}) {qty}주 @ {avg_price:,}원 — 포지션 복구 중...")
+
+        # 기존 포지션 정보를 스레드에 주입 (jitter 없이 즉시 시작)
+        slot_no = -(restored + 1)  # 복구 슬롯은 음수로 구분
+        pm.open(
+            {"code": code, "name": name, "buy_price_hint": avg_price, "qty_hint": qty},
+            slot_no,
+            jitter=False,
+        )
+        restored += 1
+
+    if restored:
+        print(f"  [복구] {restored}개 포지션 복구 완료")
+
+
 def run_scheduler():
     """멀티 포지션 + 5분 주기 스케줄러 + AI 점수 기반 라우팅"""
     sc.print_config()
@@ -326,6 +399,10 @@ def run_scheduler():
     pm = PositionManager(budget_per_slot)
     slot_counter = 0
     last_screen_time = 0
+
+    # 재시작 시 기존 보유 포지션 복구
+    print(f"\n[{get_now()}] 기존 포지션 복구 확인 중...")
+    restore_positions(pm)
 
     while True:
         # 종료 조건

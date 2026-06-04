@@ -1,5 +1,6 @@
 import requests
 import urllib3
+import time
 from datetime import datetime, timedelta
 import config
 from auth import get_access_token
@@ -17,28 +18,36 @@ def get_headers():
         "tr_id": "FHKST01010100",
     }
 
-def get_current_price(stock_code):
-    """현재가 조회"""
+def get_current_price(stock_code, max_retries=3):
+    """현재가 조회 (500 에러 시 최대 max_retries회 재시도)"""
     url = f"{config.BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
-    headers = get_headers()
     params = {
         "FID_COND_MRKT_DIV_CODE": "J",
         "FID_INPUT_ISCD": stock_code
     }
-    res = requests.get(url, headers=headers, params=params, verify=False)
-    res.raise_for_status()
-    data = res.json()
-
-    if data["rt_cd"] != "0":
-        raise Exception(f"현재가 조회 실패: {data['msg1']}")
-
-    output = data["output"]
-    return {
-        "현재가": int(output["stck_prpr"]),
-        "시가":   int(output["stck_oprc"]),
-        "전일고가": int(output["stck_hgpr"]),  # 당일 고가 (장중) — 전일은 별도 조회
-        "전일저가": int(output["stck_lwpr"]),
-    }
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            headers = get_headers()
+            res = requests.get(url, headers=headers, params=params, verify=False)
+            if res.status_code == 200:
+                data = res.json()
+                if data["rt_cd"] != "0":
+                    raise Exception(f"현재가 조회 실패: {data['msg1']}")
+                output = data["output"]
+                return {
+                    "현재가": int(output["stck_prpr"]),
+                    "시가":   int(output["stck_oprc"]),
+                    "전일고가": int(output["stck_hgpr"]),
+                    "전일저가": int(output["stck_lwpr"]),
+                }
+            # 500 등 서버 에러 → 재시도
+            last_exc = Exception(f"{res.status_code} Server Error for {stock_code}")
+        except Exception as e:
+            last_exc = e
+        wait = 0.5 * (attempt + 1)
+        time.sleep(wait)
+    raise last_exc
 
 def get_prev_day_data(stock_code):
     """전일 고가/저가 조회 (변동성 계산용)"""
