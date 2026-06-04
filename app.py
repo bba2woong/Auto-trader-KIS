@@ -526,9 +526,11 @@ with tab_backtest:
     # ── 캐시 상태 표시 (단타) ──
     if bt_type == "intraday":
         st.divider()
-        cache_key = st.session_state.get("bt_cache_key", "")
-        date_str  = bt_date.strftime("%Y%m%d")
-        expected  = f"{date_str}_{pool_option}"
+        date_str     = bt_date.strftime("%Y%m%d")
+        _cur_codes   = tuple(sorted(selected_codes)) if pool_option == "log_based" and 'selected_codes' in dir() else ()
+        _stocks_hash = str(hash(_cur_codes))[:8]
+        expected     = f"{date_str}_{pool_option}_{_stocks_hash}"
+        cache_key    = st.session_state.get("bt_cache_key", "")
         if cache_key == expected:
             cached_n = len(st.session_state.get("bt_minute_data", {}))
             st.success(f"✅ 캐시 사용 가능 — {date_str} / {cached_n}개 종목 로드됨")
@@ -580,8 +582,10 @@ with tab_backtest:
                            "initial_capital":initial_capital,"return_pct":round(ret,2),
                            "trades":n_tr,"win_rate":round(wr,1),"mdd":round(mdd,2)})
             else:
-                d_str = bt_date.strftime("%Y%m%d")
-                cache_key = f"{d_str}_{pool_option}"
+                d_str        = bt_date.strftime("%Y%m%d")
+                _run_codes   = tuple(sorted(s["code"] for s in stock_list))
+                _run_hash    = str(hash(_run_codes))[:8]
+                cache_key    = f"{d_str}_{pool_option}_{_run_hash}"
 
                 # 캐시 미스 → 데이터 수집
                 if st.session_state.get("bt_cache_key") != cache_key:
