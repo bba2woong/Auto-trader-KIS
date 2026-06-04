@@ -409,19 +409,30 @@ def run_scheduler():
         # ── 텔레그램 확인 요청 ──
         if confirm_list and pm.free_slots > 0:
             if use_telegram:
-                from telegram_bot import send_and_wait, notify
+                from telegram_bot import send_and_wait_multi, notify
+                free = pm.free_slots
                 tlog.log_confirm_sent(confirm_list[:5])
                 notify(f"📊 포지션: {len(pm.active)}/{sc.MAX_POSITIONS}개 활성\n"
-                       f"확인 필요 {len(confirm_list)}개 — 선택해주세요.")
-                selected = send_and_wait(confirm_list[:5], timeout=sc.TELEGRAM_CONFIRM_TIMEOUT)
-                if selected and selected != "PASS":
-                    target = next((s for s in confirm_list if s["code"] == selected["code"]), None)
-                    if target and pm.free_slots > 0:
-                        tlog.log_confirm_selected(target)
-                        slot_counter += 1
-                        pm.open(target, slot_counter)
-                elif selected is None:
+                       f"빈 슬롯 {free}개 — 최대 {free}개 선택 가능합니다.")
+                selected_list = send_and_wait_multi(
+                    confirm_list[:5],
+                    max_select=free,
+                    timeout=sc.TELEGRAM_CONFIRM_TIMEOUT,
+                )
+                if selected_list == "PASS":
+                    print(f"[{get_now()}] ⏭ 패스")
+                elif not selected_list:
                     print(f"[{get_now()}] ⏰ 응답 없음 — 이번 라운드 패스")
+                else:
+                    for sel in selected_list:
+                        if pm.free_slots <= 0:
+                            break
+                        target = next((s for s in confirm_list if s["code"] == sel["code"]), None)
+                        if target:
+                            tlog.log_confirm_selected(target)
+                            slot_counter += 1
+                            pm.open(target, slot_counter)
+                            time.sleep(0.5)
             else:
                 # 텔레그램 없으면 confirm도 자동 진입
                 for stock in confirm_list:
