@@ -345,7 +345,7 @@ def _pnl_color(val):
     text_col  = "white" if intensity >= 0.6 else "#111111"
 
     if v > 0:
-        color = f"rgb({base},{base},255)"
+        color = f"rgb({base},{base},240)"
     else:
         color = f"rgb(255,{base},{base})"
 
@@ -508,6 +508,20 @@ with tab_backtest:
         is_grid = rng_ls or rng_tr
     else:
         is_grid = False
+
+    # ── 단타: 종목/파라미터 변경 감지 → 결과 자동 초기화 ──
+    if bt_type == "intraday":
+        _sel_codes = selected_codes if pool_option == "log_based" and 'selected_codes' in dir() else []
+        _fingerprint = (
+            tuple(sorted(_sel_codes)),
+            round(sv_ls, 2) if not rng_ls else (round(rmin_ls,2), round(rmax_ls,2), round(rstep_ls,2)),
+            round(sv_tr, 2) if not rng_tr else (round(rmin_tr,2), round(rmax_tr,2), round(rstep_tr,2)),
+            bt_date.strftime("%Y%m%d"),
+        )
+        if st.session_state.get("bt_fingerprint") != _fingerprint:
+            st.session_state["bt_fingerprint"] = _fingerprint
+            st.session_state.pop("bt_result", None)
+            st.session_state.pop("bt_grid",   None)
 
     # ── 캐시 상태 표시 (단타) ──
     if bt_type == "intraday":
