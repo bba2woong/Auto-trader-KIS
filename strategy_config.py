@@ -176,15 +176,15 @@ def update_candidates(screened_list):
 def print_config():
     print("=" * 40)
     print(f"  K 값        : {K}")
-    print(f"  투자 비율   : {int(INVEST_RATIO * 100)}%")
+    print(f"  투자 비율   : {INVEST_RATIO * 100:.0f}%")
     if USE_TRAILING_STOP:
         print(f"  청산 방식   : 트레일링 스탑")
-        print(f"  트레일 비율 : 고점 대비 -{int(TRAILING_STOP_RATE * 100)}%")
-        print(f"  활성화 기준 : +{int(TRAILING_STOP_ACTIVATE_RATE * 100)}% 이상 상승 시")
-        print(f"  하드 손절   : -{int(LOSS_RATE * 100)}%")
+        print(f"  트레일 비율 : 고점 대비 -{TRAILING_STOP_RATE * 100:.1f}%")
+        print(f"  활성화 기준 : +{TRAILING_STOP_ACTIVATE_RATE * 100:.1f}% 이상 상승 시")
+        print(f"  하드 손절   : -{LOSS_RATE * 100:.1f}%")
     else:
-        print(f"  익절 기준   : +{int(PROFIT_RATE * 100)}%")
-        print(f"  손절 기준   : -{int(LOSS_RATE * 100)}%")
+        print(f"  익절 기준   : +{PROFIT_RATE * 100:.1f}%")
+        print(f"  손절 기준   : -{LOSS_RATE * 100:.1f}%")
     print(f"  강제 청산   : {FORCE_SELL_TIME}")
     print(f"  체크 주기   : {CHECK_INTERVAL}초")
     print(f"  최대 매매   : {MAX_TRADES_PER_DAY}회/일")
