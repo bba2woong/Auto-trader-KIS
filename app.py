@@ -728,6 +728,7 @@ with tab_backtest:
 
         else:
             st.info(f"📋 {date_str} 매매 로그 없음 — 표준 종목 풀로 진행합니다.")
+            selected_codes    = []        # 로그 없음 → 빈 리스트로 초기화
             stock_list_for_bt = None
             budget_per_pos    = initial_capital / sc.MAX_POSITIONS
             n_positions       = sc.MAX_POSITIONS
