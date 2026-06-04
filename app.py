@@ -864,7 +864,7 @@ with tab_backtest:
                     prog_text.caption("✅ 캐시 데이터 사용")
 
                 from backtest.engine_intraday import run_intraday_backtest, run_log_intraday_backtest
-                is_log_mode = (pool_option == "log_based")
+                is_log_mode = has_log   # 로그 있고 종목 선택된 경우만 True
 
                 def _make_params(kv, lv, tv):
                     return {
