@@ -1,5 +1,6 @@
 import requests
 import urllib3
+import time
 import config
 from auth import get_access_token
 
@@ -42,17 +43,13 @@ def get_stock_price(stock_code):
         "등락률": float(output["prdy_ctrt"]),
     }
 
-def get_balance():
-    """주식 잔고 조회"""
-    url = f"{config.TRD_URL}/uapi/domestic-stock/v1/trading/inquire-balance"  # ← TRD_URL로 변경
+def get_balance(max_retries=5):
+    """주식 잔고 조회 (Rate Limit 초과 시 최대 max_retries회 재시도)"""
+    url = f"{config.TRD_URL}/uapi/domestic-stock/v1/trading/inquire-balance"
     tr_id = "VTTC8434R" if config.MODE == "mock" else "TTTC8434R"
-    headers = get_headers(tr_id)
-    headers["custtype"] = "P"
 
-    account_no = config.ACCOUNT.replace("-", "")[:8]
+    account_no   = config.ACCOUNT.replace("-", "")[:8]
     product_code = config.ACCOUNT.replace("-", "")[8:] or "01"
-
-    print(f"  [디버그] 계좌번호: {account_no}, 상품코드: {product_code}")
 
     params = {
         "CANO": account_no,
@@ -68,18 +65,29 @@ def get_balance():
         "CTX_AREA_NK100": ""
     }
 
-    res = requests.get(url, headers=headers, params=params, verify=False)
+    for attempt in range(max_retries):
+        headers = get_headers(tr_id)
+        headers["custtype"] = "P"
+        res = requests.get(url, headers=headers, params=params, verify=False)
 
-    if res.status_code != 200:
-        print(f"  [에러 내용] {res.text}")
-        res.raise_for_status()
+        if res.status_code == 200:
+            data = res.json()
+            if data["rt_cd"] == "0":
+                return {
+                    "보유종목": data["output1"],
+                    "계좌요약": data["output2"]
+                }
+            # Rate Limit 오류(EGW00201)는 재시도
+            if "EGW00201" in data.get("msg_cd", ""):
+                wait = 1.0 * (attempt + 1)
+                print(f"  [잔고조회] Rate Limit — {wait:.0f}초 후 재시도 ({attempt+1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            raise Exception(f"잔고조회 오류: {data['msg1']}")
 
-    data = res.json()
+        # 500 서버 에러도 재시도
+        wait = 1.0 * (attempt + 1)
+        print(f"  [잔고조회] {res.status_code} 오류 — {wait:.0f}초 후 재시도 ({attempt+1}/{max_retries})")
+        time.sleep(wait)
 
-    if data["rt_cd"] != "0":
-        raise Exception(f"API 오류: {data['msg1']}")
-
-    return {
-        "보유종목": data["output1"],
-        "계좌요약": data["output2"]
-    }
+    raise Exception(f"잔고조회 실패: {max_retries}회 재시도 초과")
