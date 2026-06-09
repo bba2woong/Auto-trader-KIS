@@ -9,18 +9,20 @@ import strategy_config as sc
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def get_headers():
-    token = get_access_token()
+    """가격 조회 전용 헤더 — 항상 실전 앱키 + 실전 토큰 사용"""
+    from auth import get_query_token
+    token = get_query_token()
     return {
         "Content-Type": "application/json",
         "authorization": f"Bearer {token}",
-        "appkey": config.APP_KEY,
-        "appsecret": config.APP_SECRET,
+        "appkey": config.QUERY_APP_KEY,
+        "appsecret": config.QUERY_APP_SECRET,
         "tr_id": "FHKST01010100",
     }
 
-def get_current_price(stock_code, max_retries=3):
-    """현재가 조회 (500 에러 시 최대 max_retries회 재시도)"""
-    url = f"{config.BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
+def get_current_price(stock_code, max_retries=6):
+    """현재가 조회 (500/Rate Limit 에러 시 최대 max_retries회 재시도)"""
+    url = f"{config.QUERY_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
     params = {
         "FID_COND_MRKT_DIV_CODE": "J",
         "FID_INPUT_ISCD": stock_code
@@ -30,10 +32,25 @@ def get_current_price(stock_code, max_retries=3):
         try:
             headers = get_headers()
             res = requests.get(url, headers=headers, params=params, verify=False)
+            try:
+                data   = res.json()
+                msg_cd = data.get("msg_cd", "")
+            except Exception:
+                data   = {}
+                msg_cd = ""
+            if msg_cd == "EGW00123":   # 토큰 만료 (HTTP 500으로 옴)
+                from auth import invalidate_token
+                invalidate_token()
+                print(f"  [현재가] 토큰 만료 — 재발급 후 재시도 ({attempt+1}/{max_retries})")
+                continue
+            if msg_cd == "EGW00201":   # Rate Limit
+                wait = 1.0 * (attempt + 1)
+                print(f"  [현재가] Rate Limit — {wait:.0f}초 후 재시도 ({attempt+1}/{max_retries})")
+                time.sleep(wait)
+                continue
             if res.status_code == 200:
-                data = res.json()
-                if data["rt_cd"] != "0":
-                    raise Exception(f"현재가 조회 실패: {data['msg1']}")
+                if data.get("rt_cd") != "0":
+                    raise Exception(f"현재가 조회 실패: {data.get('msg1','')}")
                 output = data["output"]
                 return {
                     "현재가": int(output["stck_prpr"]),
@@ -41,45 +58,68 @@ def get_current_price(stock_code, max_retries=3):
                     "전일고가": int(output["stck_hgpr"]),
                     "전일저가": int(output["stck_lwpr"]),
                 }
-            # 500 등 서버 에러 → 재시도
+            # 그 외 HTTP 오류
+            last_exc = Exception(f"{res.status_code} Server Error for {stock_code}")
+            print(f"  [현재가] {res.status_code} 오류 — 재시도 ({attempt+1}/{max_retries})")
+        except Exception as e:
+            last_exc = e
+        wait = 1.0 * (attempt + 1)
+        time.sleep(wait)
+    raise last_exc
+
+def get_prev_day_data(stock_code, max_retries=6):
+    """전일 고가/저가 조회 (변동성 계산용) — 500/Rate Limit 재시도 포함"""
+    url = f"{config.QUERY_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-price"
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": stock_code,
+        "FID_PERIOD_DIV_CODE": "D",
+        "FID_ORG_ADJ_PRC": "0",
+    }
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            from auth import get_query_token
+            token = get_query_token()
+            headers = {
+                "Content-Type": "application/json",
+                "authorization": f"Bearer {token}",
+                "appkey": config.QUERY_APP_KEY,
+                "appsecret": config.QUERY_APP_SECRET,
+                "tr_id": "FHKST01010400",
+            }
+            res = requests.get(url, headers=headers, params=params, verify=False)
+            try:
+                data   = res.json()
+                msg_cd = data.get("msg_cd", "")
+            except Exception:
+                data   = {}
+                msg_cd = ""
+            if msg_cd == "EGW00123":   # 토큰 만료 (HTTP 500으로 옴)
+                from auth import invalidate_token
+                invalidate_token()
+                print(f"  [전일데이터] 토큰 만료 — 재발급 후 재시도 ({attempt+1}/{max_retries})")
+                continue
+            if msg_cd == "EGW00201":
+                wait = 0.5 * (attempt + 1)
+                print(f"  [전일데이터] Rate Limit — {wait:.1f}초 후 재시도 ({attempt+1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            if res.status_code == 200:
+                if data.get("rt_cd") != "0":
+                    raise Exception(f"전일 데이터 조회 실패: {data.get('msg1','')}")
+                prev = data["output"][1]
+                return {
+                    "전일고가": int(prev["stck_hgpr"]),
+                    "전일저가": int(prev["stck_lwpr"]),
+                    "전일종가": int(prev["stck_clpr"]),
+                }
             last_exc = Exception(f"{res.status_code} Server Error for {stock_code}")
         except Exception as e:
             last_exc = e
         wait = 0.5 * (attempt + 1)
         time.sleep(wait)
     raise last_exc
-
-def get_prev_day_data(stock_code):
-    """전일 고가/저가 조회 (변동성 계산용)"""
-    url = f"{config.BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-price"
-    token = get_access_token()
-    headers = {
-        "Content-Type": "application/json",
-        "authorization": f"Bearer {token}",
-        "appkey": config.APP_KEY,
-        "appsecret": config.APP_SECRET,
-        "tr_id": "FHKST01010400",
-    }
-    params = {
-        "FID_COND_MRKT_DIV_CODE": "J",
-        "FID_INPUT_ISCD": stock_code,
-        "FID_PERIOD_DIV_CODE": "D",   # 일봉
-        "FID_ORG_ADJ_PRC": "0",
-    }
-    res = requests.get(url, headers=headers, params=params, verify=False)
-    res.raise_for_status()
-    data = res.json()
-
-    if data["rt_cd"] != "0":
-        raise Exception(f"전일 데이터 조회 실패: {data['msg1']}")
-
-    # output[0] = 당일, output[1] = 전일
-    prev = data["output"][1]
-    return {
-        "전일고가": int(prev["stck_hgpr"]),
-        "전일저가": int(prev["stck_lwpr"]),
-        "전일종가": int(prev["stck_clpr"]),
-    }
 
 def calc_target_price(stock_code):
     """변동성 돌파 목표가 계산"""

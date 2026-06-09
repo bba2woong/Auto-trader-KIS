@@ -78,10 +78,15 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
         try:
             target_price = calc_target_price(stock_code)
         except Exception as e:
-            print(f"\n{tag} 목표가 계산 실패: {e}")
-            if on_close:
-                on_close("오류", stock_code)
-            return
+            # 수동매수([수동] 태그)는 목표가 실패해도 즉시 시장가 매수로 폴백
+            if "[수동]" in stock_name:
+                print(f"\n{tag} ⚠️ 목표가 조회 실패 ({e}) — 시장가 즉시 매수로 폴백")
+                target_price = 0   # 0이면 while 루프 첫 틱에 current_price >= 0 → 즉시 매수
+            else:
+                print(f"\n{tag} 목표가 계산 실패: {e}")
+                if on_close:
+                    on_close("오류", stock_code)
+                return
         bought    = False
         buy_price = 0
         quantity  = 0
@@ -144,7 +149,34 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
             return
 
         try:
-            current_price = get_current_price(stock_code)["현재가"]
+            _price_exc = None
+            try:
+                current_price = get_current_price(stock_code)["현재가"]
+            except Exception as _e1:
+                _price_exc = _e1
+                try:
+                    # strategy.py 실패 시 api.py 경로로 폴백
+                    from api import get_stock_price as _gsp
+                    current_price = _gsp(stock_code)["현재가"]
+                    _price_exc = None   # 폴백 성공
+                except Exception as _e2:
+                    # 두 경로 모두 실패 → 수동매수이고 미체결 상태면 즉시 포기
+                    if "[수동]" in stock_name and not bought:
+                        msg = (f"⚠️ 수동매수 취소: {stock_name}({stock_code})\n"
+                               f"현재가 조회 불가 (모의투자 서버 미지원 종목일 수 있음)\n"
+                               f"실전투자 모드에서 시도하거나 HTS에서 직접 매수하세요.")
+                        print(f"\n[{get_now()}] {tag} {msg}")
+                        try:
+                            from telegram_bot import notify
+                            notify(msg)
+                        except Exception:
+                            pass
+                        if on_close:
+                            on_close("오류", stock_code)
+                        return
+                    raise _e2   # 보유 중이면 기존 에러 카운터로 처리
+            if _price_exc:
+                raise _price_exc
             error_count = 0  # 성공 시 에러 카운터 리셋
 
             # ── HTS 수동매도 감지: 매 루프마다 실제 잔고 확인 ──
@@ -565,6 +597,10 @@ def run_scheduler():
 
     wait_until_market_open()
 
+    # 09:00 직후 KIS 서버 Rate Limit 완화 대기 (수만 건 동시 접속 분산)
+    print(f"[{get_now()}] 잔고 조회 전 5초 대기 (서버 부하 분산)...")
+    time.sleep(5)
+
     # 포지션당 예산 (장 시작 시 1회 계산)
     print(f"\n[{get_now()}] 포지션 예산 계산 중...")
     budget_per_slot = calc_position_budget()
@@ -634,7 +670,7 @@ def run_scheduler():
 
         # ── 스크리닝 ──
         print(f"\n[{get_now()}] 스크리닝 시작... (빈 슬롯: {pm.free_slots}개)")
-        screened = run_screening()
+        screened = run_screening(stop_event=stop_ev)   # 정지 신호 전달 → 즉시 중단 가능
         last_screen_time = time.time()
 
         # 필터: 쿨다운 제외 + 이미 보유 중 제외

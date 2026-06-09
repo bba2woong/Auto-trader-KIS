@@ -1,14 +1,15 @@
 """
 종목 총점 계산 + 일별 캐시 관리
 
-점수 구성 (최대 100점):
-  변동성 돌파  최대 30점 — 돌파 여부 + 여유율 (낮을수록 고점)
-  AD Line      25점      — 상승 여부
+점수 구성 (최대 110점):
+  변동성 돌파  최대 40점 — 돌파 여부 + 여유율 (낮을수록 고점)
+  AD Line      +15점     — 상승 여부
   캔들 패턴    +10점     — 해머 +10 / 행잉맨 0 (패널티 없음)
   60분봉 강봉  +15점     — strong_bull 감지 시
   LLM 분석     최대 10점 — bullish=10 / neutral=5 / bearish=0  (llm_score // 2)
   DART 공시    +10점     — 긍정=10 / 중립=0 / 부정=-10
-  합계         최대 100점
+  관심종목     +10점     — watchlist.py 등록 종목 가점
+  합계         최대 110점
 
 캐시 갱신 시점 (scheduler.py에서 호출):
   - 08:30 (장 전)
@@ -37,20 +38,20 @@ REFRESH_TIMES = ["0830", "1000", "1200"]   # 캐시 갱신 시각 (HH:MM 없는 
 def technical_score(screening_result: dict) -> int:
     """
     screener.py check_volatility_breakout() 반환값 기반 기술적 점수
-    변동성 돌파 최대30 + AD Line 25 + 해머 +10 + strong_bull +15 = 최대 80점
-    (LLM/DART 합산 시 최대 100점)
+    변동성 돌파 최대40 + AD Line 15 + 해머 +10 + strong_bull +15 + 관심종목 +10 = 최대 90점
+    (LLM/DART 합산 시 최대 110점)
     """
     score = 0
 
-    # 변동성 돌파 (최대 30점)
+    # 변동성 돌파 (최대 40점)
     if screening_result.get("변동성돌파"):
         gap   = screening_result.get("돌파여유율", 0)
         ratio = max(0.0, 1.0 - gap / max(sc.MAX_BREAKOUT_GAP, 0.01))
-        score += int(30 * ratio)
+        score += int(40 * ratio)
 
-    # AD Line (25점)
+    # AD Line (15점)
     if screening_result.get("AD상승"):
-        score += 25
+        score += 15
 
     # 캔들 패턴: 해머 +10 / 행잉맨 패널티 없음
     if screening_result.get("패턴") == "hammer":
@@ -59,6 +60,14 @@ def technical_score(screening_result: dict) -> int:
     # 60분봉 강한 양봉 (15점)
     if screening_result.get("시간봉패턴") == "strong_bull":
         score += 15
+
+    # 관심종목 가점 (+10점)
+    try:
+        from watchlist import WATCHLIST_CODES
+        if screening_result.get("code") in WATCHLIST_CODES:
+            score += 10
+    except Exception:
+        pass
 
     return score
 
@@ -72,19 +81,25 @@ def total_score(screening_result: dict) -> dict:
     종목 총점 반환
     반환: {
         "code": str, "total": int,
-        "tech": int, "llm": int, "dart": int,
+        "tech": int, "llm": int, "dart": int, "watchlist": int,
         "llm_opinion": str, "llm_reason": str, "dart_reason": str,
-        "grade": "A"|"B"|"C"|None  (스크리너 그레이드와 별개)
     }
     """
     code  = screening_result["code"]
-    tech  = technical_score(screening_result)
+    tech  = technical_score(screening_result)   # 관심종목 +10 포함
     cache = _load_cache()
 
     stock_cache = cache.get("stocks", {}).get(code, {})
     llm_raw     = stock_cache.get("llm_score",  10)   # 캐시 없으면 중립(10)
     llm_score   = llm_raw // 2                         # bullish=10, neutral=5, bearish=0
     dart_score  = stock_cache.get("dart_score",  0)
+
+    # 관심종목 여부 (표시용 — 실제 점수는 technical_score 내부에서 이미 가산)
+    try:
+        from watchlist import WATCHLIST_CODES
+        watchlist_bonus = 10 if code in WATCHLIST_CODES else 0
+    except Exception:
+        watchlist_bonus = 0
 
     total = tech + llm_score + dart_score
 
@@ -94,6 +109,7 @@ def total_score(screening_result: dict) -> dict:
         "tech":        tech,
         "llm":         llm_score,
         "dart":        dart_score,
+        "watchlist":   watchlist_bonus,
         "llm_opinion": stock_cache.get("llm_opinion", "unknown"),
         "llm_reason":  stock_cache.get("llm_reason",  "캐시 없음"),
         "dart_reason": stock_cache.get("dart_reason",  "캐시 없음"),

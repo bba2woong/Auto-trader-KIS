@@ -7,19 +7,48 @@
   TELEGRAM_CHAT_ID    : 메시지 수신할 채팅방 ID
 
 사용법:
-  # 단일 선택 (기존)
+  # 단일 선택
   selected = send_and_wait(candidates, timeout=300)
 
   # 멀티 선택 (빈 슬롯 수만큼)
   selected_list = send_and_wait_multi(candidates, max_select=3, timeout=300)
   # 반환: [{"code","name"}, ...] | "PASS" | []
+
+메시지 형식 (멀티 선택):
+  🥇 1위  삼성전자 ⭐관심 (005930) 🔨
+      목표가: 82,000원  여유율: +0.31%
+      📊 돌파:38점 AD:15점 캔들:10점 양봉:15점 LLM:5점 DART:10점 ⭐+10점 → 합계:93점
+
+  - watchlist.py 등록 종목은 종목명 옆 ⭐관심 배지 + 점수줄 ⭐+10점 표시
+  - score_detail 없는 경우(AI 스코어링 비활성) watchlist 배지는 직접 조회로 보정
+
+전량매도 문의: MASS_SELL_QUERY_TIMES (기본 13:30 / 14:00 / 14:30)
+재시작 충돌 방지: 봇 시작 전 deleteWebhook 호출로 이전 폴링 세션 초기화
 """
 import os
 import asyncio
 import threading
+import requests as _req
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
+
+
+def _reset_polling():
+    """
+    이전 polling 세션 강제 종료 — Conflict 방지
+    새 Application.start_polling() 전에 호출
+    """
+    if not BOT_TOKEN:
+        return
+    try:
+        _req.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+            json={"drop_pending_updates": True},
+            timeout=5,
+        )
+    except Exception:
+        pass
 
 # ──────────────────────────────────────────
 # 단일 선택 상태
@@ -139,6 +168,7 @@ def _run_single_bot(candidates):
 
 async def _single_main(candidates):
     from telegram.ext import Application, CallbackQueryHandler
+    _reset_polling()   # 이전 polling 세션 강제 종료
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CallbackQueryHandler(_single_button_handler))
     await app.initialize()
@@ -189,6 +219,7 @@ def _run_multi_bot(candidates, max_select):
 
 async def _multi_main(candidates, max_select):
     from telegram.ext import Application, CallbackQueryHandler
+    _reset_polling()   # 이전 polling 세션 강제 종료
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CallbackQueryHandler(_multi_button_handler))
     await app.initialize()
@@ -302,9 +333,39 @@ async def _send_screening_message(bot, candidates, multi=False, max_select=1):
     for i, s in enumerate(candidates):
         g   = s.get("grade", "B")
         pat = pat_emoji.get(s.get("패턴"), "")
-        ai  = f"  AI {s.get('score', 0)}점" if s.get("score") else ""
-        lines.append(f"{grade_emoji.get(g,'')} {i+1}위  {s['name']} ({s['code']}){pat}{ai}")
-        lines.append(f"    목표가: {s.get('목표가',0):,}원  여유율: {s.get('돌파여유율',0):+.2f}%\n")
+        total_score = s.get("score", 0)
+        score_line  = ""
+        d           = s.get("score_detail") or {}
+        watch_s     = d.get("watchlist", 0)
+        # 관심종목 여부를 score_detail 없는 경우에도 watchlist 직접 조회로 보정
+        if not watch_s:
+            try:
+                from watchlist import WATCHLIST_CODES as _WL
+                watch_s = 10 if s.get("code") in _WL else 0
+            except Exception:
+                pass
+        watch_badge = " ⭐관심" if watch_s else ""   # 종목명 줄에 표시할 배지
+        if total_score:
+            tech = d.get("tech", 0)
+            llm  = d.get("llm",  0)
+            dart = d.get("dart", 0)
+            # tech 세부 분해: 돌파/AD/캔들/양봉
+            import strategy_config as _sc
+            gap        = s.get("돌파여유율", 0)
+            brk_score  = int(40 * max(0.0, 1.0 - gap / max(_sc.MAX_BREAKOUT_GAP, 0.01))) if s.get("변동성돌파") else 0
+            ad_score   = 15 if s.get("AD상승") else 0
+            candle_s   = 10 if s.get("패턴") == "hammer" else 0
+            bull_s     = 15 if s.get("시간봉패턴") == "strong_bull" else 0
+            watch_str  = f" ⭐+{watch_s}점" if watch_s else ""
+            score_line = (
+                f"    📊 돌파:{brk_score}점 AD:{ad_score}점 캔들:{candle_s}점 "
+                f"양봉:{bull_s}점 LLM:{llm}점 DART:{dart}점{watch_str} → 합계:{total_score}점"
+            )
+        lines.append(f"{grade_emoji.get(g,'')} {i+1}위  {s['name']}{watch_badge} ({s['code']}){pat}")
+        lines.append(f"    목표가: {s.get('목표가',0):,}원  여유율: {s.get('돌파여유율',0):+.2f}%")
+        if score_line:
+            lines.append(score_line)
+        lines.append("")
 
     if multi:
         keyboard = _build_multi_keyboard(candidates, [], max_select)
@@ -385,6 +446,7 @@ def _run_partial_sell_bot(positions):
 
 async def _partial_sell_main(positions):
     from telegram.ext import Application, CallbackQueryHandler
+    _reset_polling()   # 이전 polling 세션 강제 종료
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CallbackQueryHandler(_partial_sell_handler))
     await app.initialize()

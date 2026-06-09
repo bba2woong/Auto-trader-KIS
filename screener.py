@@ -1,6 +1,7 @@
 import requests
 import urllib3
 import time
+import threading
 from datetime import datetime
 import config
 from auth import get_access_token
@@ -8,6 +9,10 @@ import strategy_config as sc
 from watchlist import WATCHLIST_CODES
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ── 일봉 데이터 메모리 캐시 (당일 재사용, 자정 자동 만료) ──
+_daily_cache      = {}          # {code: {"date": "YYYYMMDD", "data": [...]}}
+_daily_cache_lock = threading.Lock()
 
 # ----------------------------------------------------------------
 # 코스피 200 전체 리스트 (시가총액 상위, 반기 리밸런싱 기준)
@@ -328,31 +333,75 @@ KOSDAQ_150 = [
 
 
 def get_headers(tr_id):
-    token = get_access_token()
+    """가격 조회 전용 헤더 — 항상 실전 앱키 + 실전 토큰 사용"""
+    from auth import get_query_token
+    token = get_query_token()
     return {
         "Content-Type": "application/json",
         "authorization": f"Bearer {token}",
-        "appkey": config.APP_KEY,
-        "appsecret": config.APP_SECRET,
+        "appkey": config.QUERY_APP_KEY,
+        "appsecret": config.QUERY_APP_SECRET,
         "tr_id": tr_id,
     }
 
-def request_with_retry(url, headers, params, max_retries=3, delay=0.5):
-    """500 에러 시 재시도하는 요청 헬퍼"""
+def request_with_retry(url, headers, params, max_retries=4, delay=0.5):
+    """
+    HTTP 오류 및 Rate Limit(EGW00201) 발생 시 자동 재시도
+    - 200 OK + EGW00201 : 짧은 대기 후 재시도
+    - 500 등 서버 오류  : delay × (attempt+1) 대기 후 재시도
+    """
     for attempt in range(max_retries):
         try:
             res = requests.get(url, headers=headers, params=params, verify=False)
+            # 200이든 500이든 JSON 바디에서 에러 코드 먼저 확인
+            try:
+                body   = res.json()
+                msg_cd = body.get("msg_cd", "")
+            except Exception:
+                body   = {}
+                msg_cd = ""
+
+            if msg_cd == "EGW00123":   # 토큰 만료 (HTTP 500으로 옴)
+                from auth import invalidate_token
+                invalidate_token()
+                headers = get_headers(headers.get("tr_id", ""))
+                print(f"  [Auth] 토큰 만료 감지 — 재발급 후 재시도 ({attempt+1}/{max_retries})")
+                continue
+
+            if msg_cd == "EGW00201":   # Rate Limit
+                wait = delay * (attempt + 1)
+                time.sleep(wait)
+                headers = get_headers(headers.get("tr_id", ""))
+                continue
+
             if res.status_code == 200:
                 return res
-            # 500 등 서버 에러면 잠시 후 재시도
-            time.sleep(delay * (attempt + 1))  # 점점 더 길게 대기
-        except Exception:
+
+            # 그 외 HTTP 오류 (500 등)
+            _last_status = res.status_code
+            if attempt == 0:   # 첫 번째 실패 시만 바디 출력 (반복 방지)
+                print(f"\n  [HTTP {res.status_code}] body={res.text[:200]}")
             time.sleep(delay * (attempt + 1))
+        except Exception as _ex:
+            _last_status = str(_ex)
+            time.sleep(delay * (attempt + 1))
+    print(f"\n  [재시도초과] {url.split('/')[-1]} → {_last_status}")
     return None  # 모든 재시도 실패
 
 def get_daily_data(stock_code):
-    """일봉 데이터 조회 (전일 고가/저가/종가 + AD Line 계산용)"""
-    url = f"{config.BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-price"
+    """
+    일봉 데이터 조회 (전일 고가/저가/종가 + AD Line 계산용)
+    당일 첫 호출만 API 요청 — 이후는 메모리 캐시에서 즉시 반환
+    """
+    today = datetime.now().strftime("%Y%m%d")
+
+    # 캐시 히트 확인
+    with _daily_cache_lock:
+        cached = _daily_cache.get(stock_code)
+        if cached and cached["date"] == today:
+            return cached["data"]
+
+    url = f"{config.QUERY_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-price"
     headers = get_headers("FHKST01010400")
     params = {
         "FID_COND_MRKT_DIV_CODE": "J",
@@ -360,7 +409,7 @@ def get_daily_data(stock_code):
         "FID_PERIOD_DIV_CODE": "D",
         "FID_ORG_ADJ_PRC": "0",
     }
-    res = request_with_retry(url, headers, params)  # ← 재시도 적용
+    res = request_with_retry(url, headers, params)
     if res is None:
         return None
 
@@ -368,11 +417,14 @@ def get_daily_data(stock_code):
     if data["rt_cd"] != "0":
         return None
 
-    return data["output"]
+    result = data["output"]
+    with _daily_cache_lock:
+        _daily_cache[stock_code] = {"date": today, "data": result}
+    return result
 
 def get_current_price_simple(stock_code):
     """현재가 + 시가 간단 조회"""
-    url = f"{config.BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
+    url = f"{config.QUERY_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = get_headers("FHKST01010100")
     params = {
         "FID_COND_MRKT_DIV_CODE": "J",
@@ -487,7 +539,7 @@ def get_prev_hour_candle(stock_code):
             return None
 
         hour_str = f"{prev_hour:02d}0000"   # "090000", "100000" 등
-        url      = f"{config.BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        url      = f"{config.QUERY_URL}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
         headers  = get_headers("FHKST03010200")
         params   = {
             "FID_ETC_CLS_CODE":       "0",
@@ -563,10 +615,12 @@ def check_volatility_breakout(stock_code):
     try:
         daily = get_daily_data(stock_code)
         if not daily or len(daily) < 2:
+            print(f"\n  [오류] {stock_code} 일봉 데이터 없음 (daily={daily is not None and len(daily) if daily else None})")
             return None
 
         current = get_current_price_simple(stock_code)
         if not current:
+            print(f"\n  [오류] {stock_code} 현재가 조회 실패")
             return None
 
         prev_high = int(daily[1]["stck_hgpr"])
@@ -675,28 +729,36 @@ _PATTERN_EMOJI = {
 }
 
 
-def run_screening(progress_cb=None):
+def run_screening(progress_cb=None, stop_event=None):
     """
-    전체 스크리닝 실행
+    전체 스크리닝 실행 (직렬 처리)
     progress_cb : (current, total, name) → None  (UI 진행률 콜백, 선택)
+    stop_event  : threading.Event — set() 시 조기 중단
     그레이드: A(변동성+해머) > B(변동성) > C(해머만)
     행잉맨(hanging_man)은 매수 후보 제외, 보유 종목 경고용으로만 반환
     """
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 스크리닝 시작...")
     pool   = build_screening_pool()
+    total  = len(pool)
     passed = []
     warned = []
     failed = []
 
     for i, stock in enumerate(pool):
-        print(f"  [{i+1}/{len(pool)}] {stock['name']} 체크 중...", end="\r")
+        # 정지 신호 확인
+        if stop_event and stop_event.is_set():
+            print(f"\n  [스크리닝] 정지 요청 — 중단 ({i}/{total})")
+            break
+
+        print(f"  [{i+1}/{total}] {stock['name']} 체크 중...", end="\r")
         if progress_cb:
-            progress_cb(i + 1, len(pool), stock["name"])
+            progress_cb(i + 1, total, stock["name"])
+
         result = check_volatility_breakout(stock["code"])
+        time.sleep(0.4)   # KIS API Rate Limit 방지 (초당 ~2.5건)
 
         if result is None:
             failed.append(stock["code"])
-            time.sleep(0.5)
             continue
 
         grade = _grade(
@@ -715,20 +777,17 @@ def run_screening(progress_cb=None):
                 "패턴":       result["패턴"],
                 "시간봉패턴": result.get("시간봉패턴"),
                 "grade":      grade,
-                # scorer.py technical_score() 에서 사용
                 "변동성돌파": result["변동성돌파"],
                 "AD상승":     result["AD상승"],
             })
         elif result["패턴"] == "hanging_man":
             warned.append(stock["name"])
 
-        time.sleep(0.5)
-
     # 정렬: 그레이드 오름차순(A→B→C), 같은 그레이드 내에서는 돌파여유율 낮은 순
     passed.sort(key=lambda x: (_GRADE_ORDER[x["grade"]], x["돌파여유율"]))
 
     print(f"\n[스크리닝 완료]")
-    print(f"  전체: {len(pool)}개 | 통과: {len(passed)}개 | 오류: {len(failed)}개")
+    print(f"  전체: {total}개 | 통과: {len(passed)}개 | 오류: {len(failed)}개")
 
     if passed:
         print(f"\n  ✅ 매수 후보:")

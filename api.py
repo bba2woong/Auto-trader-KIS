@@ -18,7 +18,7 @@ def get_headers(tr_id):
 
 def get_stock_price(stock_code):
     """주식 현재가 조회"""
-    url = f"{config.BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
+    url = f"{config.QUERY_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = get_headers("FHKST01010100")
     params = {
         "FID_COND_MRKT_DIV_CODE": "J",
@@ -43,7 +43,7 @@ def get_stock_price(stock_code):
         "등락률": float(output["prdy_ctrt"]),
     }
 
-def get_balance(max_retries=5):
+def get_balance(max_retries=15):
     """주식 잔고 조회 (Rate Limit 초과 시 최대 max_retries회 재시도)"""
     url = f"{config.TRD_URL}/uapi/domestic-stock/v1/trading/inquire-balance"
     tr_id = "VTTC8434R" if config.MODE == "mock" else "TTTC8434R"
@@ -70,22 +70,34 @@ def get_balance(max_retries=5):
         headers["custtype"] = "P"
         res = requests.get(url, headers=headers, params=params, verify=False)
 
+        try:
+            data   = res.json()
+            msg_cd = data.get("msg_cd", "")
+        except Exception:
+            data   = {}
+            msg_cd = ""
+
+        if msg_cd == "EGW00123":   # 토큰 만료 (HTTP 500으로 옴)
+            from auth import invalidate_token
+            invalidate_token()
+            headers = get_headers(tr_id)
+            headers["custtype"] = "P"
+            print(f"  [잔고조회] 토큰 만료 — 재발급 후 재시도 ({attempt+1}/{max_retries})")
+            continue
+        if msg_cd == "EGW00201":   # Rate Limit
+            wait = 2.0 + attempt * 1.5   # 2, 3.5, 5, 6.5, 8 ... 초
+            print(f"  [잔고조회] Rate Limit — {wait:.1f}초 후 재시도 ({attempt+1}/{max_retries})")
+            time.sleep(wait)
+            continue
         if res.status_code == 200:
-            data = res.json()
-            if data["rt_cd"] == "0":
+            if data.get("rt_cd") == "0":
                 return {
                     "보유종목": data["output1"],
                     "계좌요약": data["output2"]
                 }
-            # Rate Limit 오류(EGW00201)는 재시도
-            if "EGW00201" in data.get("msg_cd", ""):
-                wait = 1.0 * (attempt + 1)
-                print(f"  [잔고조회] Rate Limit — {wait:.0f}초 후 재시도 ({attempt+1}/{max_retries})")
-                time.sleep(wait)
-                continue
-            raise Exception(f"잔고조회 오류: {data['msg1']}")
+            raise Exception(f"잔고조회 오류: {data.get('msg1','')}")
 
-        # 500 서버 에러도 재시도
+        # 그 외 HTTP 오류
         wait = 1.0 * (attempt + 1)
         print(f"  [잔고조회] {res.status_code} 오류 — {wait:.0f}초 후 재시도 ({attempt+1}/{max_retries})")
         time.sleep(wait)

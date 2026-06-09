@@ -32,6 +32,7 @@ class _LogBuffer:
         self._lock   = threading.Lock()
         self.status  = ""
         self.history = []
+        self.verbose  = []   # 전체 상세 로그 (VS Code 터미널 수준)
 
     def update_status(self, msg):
         with self._lock:
@@ -40,9 +41,17 @@ class _LogBuffer:
     def add_history(self, msg):
         with self._lock:
             ts = datetime.now().strftime("%H:%M:%S")
-            self.history.append(f"[{ts}] {msg.rstrip()}")
+            entry = f"[{ts}] {msg.rstrip()}"
+            self.history.append(entry)
             if len(self.history) > 200:
                 self.history = self.history[-200:]
+
+    def add_verbose(self, msg):
+        with self._lock:
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.verbose.append(f"[{ts}] {msg.rstrip()}")
+            if len(self.verbose) > 2000:
+                self.verbose = self.verbose[-2000:]
 
     def get_status(self):
         with self._lock: return self.status
@@ -50,10 +59,14 @@ class _LogBuffer:
     def get_history(self):
         with self._lock: return list(self.history)
 
+    def get_verbose(self):
+        with self._lock: return list(self.verbose)
+
     def clear(self):
         with self._lock:
             self.status  = ""
             self.history = []
+            self.verbose  = []
 
 
 class _LogCapture:
@@ -75,6 +88,8 @@ class _LogCapture:
         s = line.strip()
         if not s:
             return
+        # 전체 상세 로그 (항상 기록)
+        self.buf.add_verbose(s)
         is_repeat = (
             any(k in s for k in self.buf.REPEAT_KW) or "\r" in s
         )
@@ -89,8 +104,10 @@ class _LogCapture:
 
 # 모듈 레벨 전역 버퍼
 # sys.modules에 저장 → Streamlit 리런 시 재생성 방지 (스레드와 공유)
+# 구버전 인스턴스(add_verbose 없음)는 자동으로 교체
 _LOG_BUF_KEY = "_kis_trader_log_buf"
-if _LOG_BUF_KEY not in sys.modules:
+_existing = sys.modules.get(_LOG_BUF_KEY)
+if _existing is None or not hasattr(_existing, "add_verbose"):
     sys.modules[_LOG_BUF_KEY] = _LogBuffer()
 _log_buf: _LogBuffer = sys.modules[_LOG_BUF_KEY]
 
@@ -462,7 +479,7 @@ with tab_trade:
         status = _log_buf.get_status()
         st.caption(f"📡 {status}" if status else "📡 대기 중...")
 
-        # 중요 이벤트 누적 로그
+        # ── 중요 이벤트 누적 로그 ──
         history = _log_buf.get_history()
         col_log, col_clear = st.columns([5, 1])
         with col_clear:
@@ -474,6 +491,30 @@ with tab_trade:
                         language=None)
             else:
                 st.info("중요 이벤트가 여기에 표시됩니다.")
+
+        # ── 상세 로그 (VS Code 터미널 수준 전체 출력) ──
+        st.divider()
+        verbose_lines = _log_buf.get_verbose()
+        verbose_count = len(verbose_lines)
+
+        col_v1, col_v2, col_v3 = st.columns([3, 1, 1])
+        with col_v1:
+            st.markdown(f"**📟 상세 로그** &nbsp; <span style='color:gray;font-size:0.85em'>({verbose_count}줄 누적)</span>",
+                        unsafe_allow_html=True)
+        with col_v2:
+            show_n = st.selectbox("표시 줄 수", [100, 200, 500, 1000],
+                                  index=0, key="verbose_show_n", label_visibility="collapsed")
+        with col_v3:
+            if st.button("🗑 상세 로그 지우기", key="clear_verbose"):
+                with _log_buf._lock:
+                    _log_buf.verbose = []
+
+        if verbose_lines:
+            # 최신 N줄을 역순으로 (최신이 위)
+            display = list(reversed(verbose_lines[-show_n:]))
+            st.code("\n".join(display), language=None)
+        else:
+            st.info("상세 로그가 여기에 표시됩니다. (트레이딩 시작 후 모든 출력 포함)")
 
     _trade_log_fragment()
 
