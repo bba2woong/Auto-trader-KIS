@@ -1,0 +1,44 @@
+{
+  "name": "kis-auto-trader",
+  "version": "1.0.0",
+  "description": "KIS Auto Trader Desktop App",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "com.kisautotrader.app",
+    "productName": "KIS Auto Trader",
+    "directories": {
+      "output": "../dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "../assets/icon.ico"
+    },
+    "files": [
+      "**/*",
+      "../app.py",
+      "../*.py",
+      "../scoring/**",
+      "../backtest/**",
+      "../watchlist.py",
+      "../strategy_config.py",
+      "../requirements.txt",
+      "!../venv/**",
+      "!../.cache/**",
+      "!../trading_logs/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../venv",
+        "to": "venv"
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.0.0"
+  }
+}

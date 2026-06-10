@@ -25,3 +25,8 @@ scoring/cache/
 # OS
 Thumbs.db
 .DS_Store
+
+# Electron
+electron/node_modules/
+dist/
+assets/icon.ico
