@@ -578,6 +578,14 @@ def run_scheduler():
     stop_ev = _get_stop_event()
     stop_ev.clear()   # 시작 시 초기화
 
+    # 상태 파일 저장 (watchdog 재시작 후 복구 감지용)
+    try:
+        import config as _cfg_state
+        from trading_state import save_state
+        save_state(mode=_cfg_state.MODE, running=True)
+    except Exception:
+        pass
+
     sc.print_config()
 
     use_telegram = _telegram_enabled()
@@ -599,7 +607,7 @@ def run_scheduler():
 
     # 09:00 직후 KIS 서버 Rate Limit 완화 대기 (수만 건 동시 접속 분산)
     print(f"[{get_now()}] 잔고 조회 전 5초 대기 (서버 부하 분산)...")
-    time.sleep(5)
+    time.sleep(180)
 
     # 포지션당 예산 (장 시작 시 1회 계산)
     print(f"\n[{get_now()}] 포지션 예산 계산 중...")
@@ -707,6 +715,11 @@ def run_scheduler():
 
         # 스크리닝 결과 로그
         tlog.log_screening(screen_round, auto_list + confirm_list)
+        try:
+            from telegram_alarm import notify_screening_result
+            notify_screening_result(screen_round, auto_list + confirm_list)
+        except Exception:
+            pass
 
         # ── 자동 매수 ──
         for stock in auto_list:
@@ -735,7 +748,11 @@ def run_scheduler():
                     max_select=free,
                     timeout=sc.TELEGRAM_CONFIRM_TIMEOUT,
                 )
-                if selected_list == "PASS":
+                if selected_list == "RESTART":
+                    print(f"[{get_now()}] 🔄 텔레그램 재시작 요청 — 즉시 재스크리닝")
+                    last_screen_time = 0
+                    continue
+                elif selected_list == "PASS":
                     print(f"[{get_now()}] ⏭ 패스")
                 elif not selected_list:
                     print(f"[{get_now()}] ⏰ 응답 없음 — 이번 라운드 패스")
@@ -764,3 +781,10 @@ def run_scheduler():
         t.join(timeout=300)  # 최대 5분 대기
 
     pm.print_summary()
+
+    # 정상 종료 — 상태 파일 초기화
+    try:
+        from trading_state import clear_state
+        clear_state()
+    except Exception:
+        pass

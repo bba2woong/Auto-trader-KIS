@@ -172,6 +172,96 @@ def _start_scheduler(mode: str):
     st.session_state["trader_running"] = True
     st.session_state["trader_mode"]    = mode
 
+    # 워치독 스레드 시작
+    wd = threading.Thread(target=_watchdog_loop, args=(mode,), daemon=True)
+    wd.start()
+    st.session_state["watchdog_thread"] = wd
+
+
+_telegram_error_count = 0
+
+
+def _restart_scheduler(mode: str):
+    """워치독이 스케줄러를 재시작할 때 사용하는 내부 헬퍼."""
+    import config as cfg
+    from scheduler import _get_stop_event
+    from telegram_alarm import notify_alarm
+
+    _get_stop_event().set()  # 기존 스케줄러 정지 요청
+    import time as _time
+    _time.sleep(2)
+    _get_stop_event().clear()
+    cfg.reload(mode)
+
+    capture = _LogCapture(sys.stdout, _log_buf)
+    sys.stdout = capture
+
+    def _run():
+        try:
+            from scheduler import run_scheduler
+            run_scheduler()
+        except Exception as e:
+            _log_buf.add_history(f"⚠️ 스케줄러 재시작 오류: {e}")
+        finally:
+            sys.stdout = capture.original
+            st.session_state["trader_running"] = False
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    st.session_state["trader_thread"]  = t
+    st.session_state["trader_running"] = True
+    notify_alarm("✅ 트레이딩 재시작 완료")
+
+
+def _watchdog_loop(mode: str):
+    """10초 주기로 트레이더 스레드와 텔레그램 봇 상태 감시."""
+    import time as _time
+    global _telegram_error_count
+
+    while True:
+        _time.sleep(10)
+
+        # trader_running이 False이면 워치독 종료
+        if not st.session_state.get("trader_running", False):
+            break
+
+        t_thread = st.session_state.get("trader_thread")
+
+        # 스레드 비정상 종료 감지
+        if t_thread and not t_thread.is_alive():
+            try:
+                from telegram_alarm import notify_alarm
+                notify_alarm("🚨 트레이딩 스레드 비정상 종료 감지 — 3초 후 재시작")
+            except Exception:
+                pass
+            _time.sleep(3)
+            try:
+                _restart_scheduler(mode)
+            except Exception as e:
+                _log_buf.add_history(f"⚠️ 워치독 재시작 실패: {e}")
+            continue
+
+        # 텔레그램 봇 polling 무응답 감지
+        try:
+            from telegram_bot import _last_poll_success
+            if _time.time() - _last_poll_success > 120:
+                _telegram_error_count += 1
+                if _telegram_error_count >= 3:
+                    try:
+                        from telegram_alarm import notify_alarm
+                        notify_alarm("🚨 텔레그램 봇 2분 이상 무응답 — 스케줄러 재시작")
+                    except Exception:
+                        pass
+                    _telegram_error_count = 0
+                    try:
+                        _restart_scheduler(mode)
+                    except Exception as e:
+                        _log_buf.add_history(f"⚠️ 워치독 텔레그램 재시작 실패: {e}")
+            else:
+                _telegram_error_count = 0
+        except Exception:
+            pass
+
 # ──────────────────────────────────────────
 # 페이지 설정
 # ──────────────────────────────────────────
@@ -180,6 +270,27 @@ st.set_page_config(
     page_icon="📈",
     layout="wide",
 )
+
+# Streamlit 핫리로드로 인한 봇 중복 실행 방지
+if "bot_guard" not in st.session_state:
+    st.session_state["bot_guard"] = True
+    try:
+        from telegram_bot import _bot_running
+        _bot_running.clear()
+    except Exception:
+        pass
+
+# 비정상 종료 감지 (watchdog 재시작 후 1회만 실행)
+if "recovery_checked" not in st.session_state:
+    st.session_state["recovery_checked"] = True
+    try:
+        from trading_state import load_state, is_market_hours
+        _rs = load_state()
+        if _rs.get("running") and is_market_hours():
+            st.session_state["recovery_mode"]      = True
+            st.session_state["recovery_mode_last"] = _rs.get("mode", "mock")
+    except Exception:
+        pass
 
 st.title("📈 KIS Auto Trader")
 
@@ -394,6 +505,49 @@ with tab_screen:
 # ══════════════════════════════════════════
 with tab_trade:
     st.subheader("🚀 트레이딩")
+
+    # ── 비정상 종료 복구 배너 ──
+    if st.session_state.get("recovery_mode"):
+        _last_mode = st.session_state.get("recovery_mode_last", "mock")
+        _last_label = "모의투자" if _last_mode == "mock" else "실전투자"
+        st.warning(
+            f"⚠️ **비정상 종료가 감지되었습니다.**\n\n"
+            f"마지막 실행 모드: **{_last_label}**\n\n"
+            f"텔레그램으로 재시작 모드 선택 요청을 전송했습니다.\n"
+            f"3분 내 응답 없으면 **모의투자**로 자동 진입합니다."
+        )
+        # 복구 스레드가 아직 시작 안 됐으면 시작
+        if not st.session_state.get("recovery_thread_started"):
+            st.session_state["recovery_thread_started"] = True
+
+            def _send_recovery_query(last_mode):
+                try:
+                    from telegram_bot import send_recovery_query
+                    result = send_recovery_query(last_mode=last_mode, timeout=180)
+                except Exception:
+                    result = None
+
+                selected_mode = result if result in ("mock", "real") else "mock"
+                if result is None:
+                    try:
+                        from telegram_alarm import notify_alarm
+                        notify_alarm("⏰ 복구 응답 없음 — 모의투자로 자동 진입합니다.")
+                    except Exception:
+                        pass
+
+                import config as _cfg
+                _cfg.reload(selected_mode)
+                os.environ["TRADING_MODE"] = selected_mode
+                st.session_state["trading_mode"]   = selected_mode
+                st.session_state["recovery_mode"]  = False
+                _start_scheduler(selected_mode)   # 워치독 포함 자동 시작
+
+            _rt = threading.Thread(
+                target=_send_recovery_query,
+                args=(st.session_state.get("recovery_mode_last", "mock"),),
+                daemon=True,
+            )
+            _rt.start()
 
     running  = st.session_state.get("trader_running", False)
     t_mode   = st.session_state.get("trader_mode", "—")

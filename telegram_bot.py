@@ -12,7 +12,7 @@
 
   # 멀티 선택 (빈 슬롯 수만큼)
   selected_list = send_and_wait_multi(candidates, max_select=3, timeout=300)
-  # 반환: [{"code","name"}, ...] | "PASS" | []
+  # 반환: [{"code","name"}, ...] | "PASS" | "RESTART" | []
 
 메시지 형식 (멀티 선택):
   🥇 1위  삼성전자 ⭐관심 (005930) 🔨
@@ -24,14 +24,34 @@
 
 전량매도 문의: MASS_SELL_QUERY_TIMES (기본 13:30 / 14:00 / 14:30)
 재시작 충돌 방지: 봇 시작 전 deleteWebhook 호출로 이전 폴링 세션 초기화
+Conflict 방지: _bot_running Event로 중복 호출 차단, Conflict 감지 시 최대 2회 재시도
 """
 import os
 import asyncio
 import threading
+import time
 import requests as _req
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
+
+# 중복 실행 방지 — 동일 프로세스 내 재진입 차단
+_bot_running = threading.Event()
+
+# 마지막 정상 polling 시각 (워치독용)
+_last_poll_success = time.time()
+
+
+def _notify_alarm_safe(message: str):
+    """
+    봇 오류 상황에서도 알람봇으로 단방향 알림 전송.
+    선택봇과 알람봇은 별도 토큰이므로 선택봇 오류와 무관하게 동작.
+    """
+    try:
+        from telegram_alarm import notify_alarm
+        notify_alarm(message)
+    except Exception:
+        pass
 
 
 def _reset_polling():
@@ -54,8 +74,10 @@ def _reset_polling():
 # 단일 선택 상태
 # ──────────────────────────────────────────
 _state = {
-    "result": None,
-    "event":  threading.Event(),
+    "result":     None,
+    "event":      threading.Event(),
+    "msg_id":     None,
+    "candidates": [],
 }
 
 # ──────────────────────────────────────────
@@ -86,19 +108,39 @@ def send_and_wait(candidates, timeout=300):
     단일 종목 선택 (기존 방식 유지)
     반환: {"code","name"} | "PASS" | None
     """
+    if _bot_running.is_set():
+        print("[TelegramBot] 이미 실행 중 — 중복 호출 차단")
+        return None
     _check_env()
     _state["result"]     = None
+    _state["msg_id"]     = None
     _state["candidates"] = list(candidates)
     _state["event"].clear()
 
+    _bot_running.set()
     t = threading.Thread(target=_run_single_bot, args=(candidates,), daemon=True)
     t.start()
-    responded = _state["event"].wait(timeout=timeout)
+
+    # 30초 단위로 봇 스레드 생존 확인
+    elapsed = 0
+    while elapsed < timeout:
+        chunk = min(30, timeout - elapsed)
+        if _state["event"].wait(timeout=chunk):
+            break
+        elapsed += chunk
+        if not t.is_alive():
+            print("[TelegramBot] 봇 스레드 비정상 종료 감지")
+            _notify_alarm_safe("⚠️ 텔레그램 봇 오류 감지 — 워치독이 처리합니다.")
+            _bot_running.clear()
+            return None
+
+    responded = _state["event"].is_set()
     _state["event"].set()
     t.join(timeout=5)
+    _bot_running.clear()
 
     if not responded:
-        _notify_timeout()
+        _notify_timeout(mode="single")
         return None
     return _state["result"]
 
@@ -114,30 +156,103 @@ def send_and_wait_multi(candidates, max_select=1, timeout=300):
     - max_select 개 모두 선택되면 자동 완료
     - "선택 완료" 버튼 탭 → 현재 선택 확정
     - "패스" 버튼 탭 → "PASS" 반환
-    반환: [{"code","name"}, ...] | "PASS" | []
+    - "재시작" 버튼 탭 → "RESTART" 반환
+    반환: [{"code","name"}, ...] | "PASS" | "RESTART" | []
     """
     if max_select <= 0:
         return []
+    if _bot_running.is_set():
+        print("[TelegramBot] 이미 실행 중 — 중복 호출 차단")
+        return []
     _check_env()
 
-    _multi_state["selections"] = []
-    _multi_state["max_select"] = max_select
-    _multi_state["candidates"] = list(candidates)
-    _multi_state["msg_id"]     = None
+    _multi_state["selections"]        = []
+    _multi_state["max_select"]        = max_select
+    _multi_state["candidates"]        = list(candidates)
+    _multi_state["msg_id"]            = None
+    _multi_state["restart_requested"] = False
     _multi_state["event"].clear()
 
+    _bot_running.set()
     t = threading.Thread(target=_run_multi_bot, args=(candidates, max_select), daemon=True)
     t.start()
-    responded = _multi_state["event"].wait(timeout=timeout)
+
+    # 30초 단위로 봇 스레드 생존 확인
+    elapsed = 0
+    while elapsed < timeout:
+        chunk = min(30, timeout - elapsed)
+        if _multi_state["event"].wait(timeout=chunk):
+            break
+        elapsed += chunk
+        if not t.is_alive():
+            print("[TelegramBot] 봇 스레드 비정상 종료 감지")
+            _notify_alarm_safe("⚠️ 텔레그램 봇 오류 감지 — 워치독이 처리합니다.")
+            _bot_running.clear()
+            return []
+
+    responded = _multi_state["event"].is_set()
     _multi_state["event"].set()
     t.join(timeout=5)
+    _bot_running.clear()
 
     if not responded:
-        _notify_timeout()
+        _notify_timeout(mode="multi")
         return []
+
+    if _multi_state.get("restart_requested"):
+        return "RESTART"
 
     result = _multi_state["selections"]
     return "PASS" if result == "PASS" else result
+
+
+# ──────────────────────────────────────────
+# 비정상 종료 복구 — 모드 선택 요청
+# ──────────────────────────────────────────
+
+def send_recovery_query(last_mode: str, timeout: int = 180) -> str:
+    """
+    비정상 종료 감지 후 재시작 모드를 텔레그램으로 문의.
+    반환: "mock" | "real" | None (무응답 또는 skip)
+    """
+    if not BOT_TOKEN or not CHAT_ID:
+        return None
+    _state["result"] = None
+    _state["event"].clear()
+    try:
+        asyncio.run(_send_recovery_message(last_mode, timeout))
+    except Exception:
+        return None
+    responded = _state["event"].wait(timeout=timeout)
+    _state["event"].set()
+    return _state["result"] if responded else None
+
+
+async def _send_recovery_message(last_mode: str, timeout: int):
+    from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+    last_label = "🟡 모의투자" if last_mode == "mock" else "🔴 실전투자"
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🟡 모의투자로 재시작", callback_data="RECOVER:mock"),
+            InlineKeyboardButton("🔴 실전투자로 재시작", callback_data="RECOVER:real"),
+        ],
+        [
+            InlineKeyboardButton("⏸ 재시작 안 함", callback_data="RECOVER:skip"),
+        ],
+    ])
+    bot = Bot(token=BOT_TOKEN)
+    async with bot:
+        msg = await bot.send_message(
+            chat_id=CHAT_ID,
+            text=(
+                f"🚨 KIS Auto Trader 비정상 종료 감지\n\n"
+                f"마지막 실행 모드: {last_label}\n"
+                f"재시작할 모드를 선택하세요.\n\n"
+                f"⏰ {timeout // 60}분 내 응답 없으면 모의투자로 자동 진입합니다."
+            ),
+            reply_markup=keyboard,
+        )
+    _state["msg_id"] = msg.message_id
 
 
 # ──────────────────────────────────────────
@@ -160,21 +275,47 @@ def notify(message):
 def _run_single_bot(candidates):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(_single_main(candidates))
-    finally:
-        loop.close()
+    MAX_RETRY = 2
+    for attempt in range(MAX_RETRY):
+        try:
+            loop.run_until_complete(_single_main(candidates))
+            break
+        except Exception as e:
+            if "Conflict" in str(e) and attempt < MAX_RETRY - 1:
+                print(f"[TelegramBot] Conflict 감지 ({attempt+1}/{MAX_RETRY}) — 10초 대기 후 재시도")
+                _notify_alarm_safe(
+                    f"⚠️ 텔레그램 봇 충돌 감지\n10초 후 재시도 ({attempt+1}/{MAX_RETRY})"
+                )
+                time.sleep(10)
+                loop.close()
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            else:
+                if "Conflict" in str(e):
+                    print("[TelegramBot] Conflict 재시도 실패 — 이번 라운드 패스")
+                    _notify_alarm_safe("🚨 텔레그램 봇 복구 실패 — 이번 라운드 패스")
+                    _state["event"].set()
+                break
+    loop.close()
 
 
 async def _single_main(candidates):
     from telegram.ext import Application, CallbackQueryHandler
     _reset_polling()   # 이전 polling 세션 강제 종료
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .connect_timeout(10)
+        .read_timeout(10)
+        .build()
+    )
     app.add_handler(CallbackQueryHandler(_single_button_handler))
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    await _send_screening_message(app.bot, candidates, multi=False)
+    msg = await _send_screening_message(app.bot, candidates, multi=False)
+    if msg:
+        _state["msg_id"] = msg.message_id
     while not _state["event"].is_set():
         await asyncio.sleep(0.3)
     await app.updater.stop()
@@ -183,9 +324,25 @@ async def _single_main(candidates):
 
 
 async def _single_button_handler(update, context):
+    global _last_poll_success
+    _last_poll_success = time.time()
     query = update.callback_query
     await query.answer()
     data  = query.data
+
+    if data.startswith("RECOVER:"):
+        mode = data.split(":")[1]
+        if mode == "mock":
+            await query.edit_message_text("🟡 모의투자로 재시작합니다.")
+            _state["result"] = "mock"
+        elif mode == "real":
+            await query.edit_message_text("🔴 실전투자로 재시작합니다.")
+            _state["result"] = "real"
+        else:  # skip
+            await query.edit_message_text("⏸ 재시작을 취소했습니다.")
+            _state["result"] = None
+        _state["event"].set()
+        return
 
     if data == "PASS":
         await query.edit_message_text("⏭ 오늘 매매 패스했습니다.")
@@ -211,21 +368,47 @@ async def _single_button_handler(update, context):
 def _run_multi_bot(candidates, max_select):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(_multi_main(candidates, max_select))
-    finally:
-        loop.close()
+    MAX_RETRY = 2
+    for attempt in range(MAX_RETRY):
+        try:
+            loop.run_until_complete(_multi_main(candidates, max_select))
+            break
+        except Exception as e:
+            if "Conflict" in str(e) and attempt < MAX_RETRY - 1:
+                print(f"[TelegramBot] Conflict 감지 ({attempt+1}/{MAX_RETRY}) — 10초 대기 후 재시도")
+                _notify_alarm_safe(
+                    f"⚠️ 텔레그램 봇 충돌 감지\n10초 후 재시도 ({attempt+1}/{MAX_RETRY})"
+                )
+                time.sleep(10)
+                loop.close()
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            else:
+                if "Conflict" in str(e):
+                    print("[TelegramBot] Conflict 재시도 실패 — 이번 라운드 패스")
+                    _notify_alarm_safe("🚨 텔레그램 봇 복구 실패 — 이번 라운드 패스")
+                    _multi_state["event"].set()
+                break
+    loop.close()
 
 
 async def _multi_main(candidates, max_select):
     from telegram.ext import Application, CallbackQueryHandler
     _reset_polling()   # 이전 polling 세션 강제 종료
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .connect_timeout(10)
+        .read_timeout(10)
+        .build()
+    )
     app.add_handler(CallbackQueryHandler(_multi_button_handler))
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    await _send_screening_message(app.bot, candidates, multi=True, max_select=max_select)
+    msg = await _send_screening_message(app.bot, candidates, multi=True, max_select=max_select)
+    if msg:
+        _multi_state["msg_id"] = msg.message_id
     while not _multi_state["event"].is_set():
         await asyncio.sleep(0.3)
     await app.updater.stop()
@@ -234,9 +417,20 @@ async def _multi_main(candidates, max_select):
 
 
 async def _multi_button_handler(update, context):
+    global _last_poll_success
+    _last_poll_success = time.time()
     query = update.callback_query
     await query.answer()
     data  = query.data
+
+    if data == "RESTART":
+        await query.edit_message_text(
+            "🔄 재시작 요청이 전송되었습니다.\n잠시 후 새 스크리닝 메시지가 도착합니다."
+        )
+        _multi_state["restart_requested"] = True
+        _multi_state["selections"] = []
+        _multi_state["event"].set()
+        return
 
     if data == "PASS":
         await query.edit_message_text("⏭ 오늘 매매 패스했습니다.")
@@ -311,6 +505,7 @@ def _build_multi_keyboard(candidates, selections, max_select):
     keyboard.append([
         InlineKeyboardButton(f"✅ 선택 완료 ({n}/{max_select})", callback_data="CONFIRM"),
         InlineKeyboardButton("⏭ 패스", callback_data="PASS"),
+        InlineKeyboardButton("🔄 재시작", callback_data="RESTART"),
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -381,16 +576,41 @@ async def _send_screening_message(bot, candidates, multi=False, max_select=1):
         rows.append([InlineKeyboardButton("⏭  오늘 패스", callback_data="PASS")])
         keyboard = InlineKeyboardMarkup(rows)
 
-    await bot.send_message(
+    msg = await bot.send_message(
         chat_id=CHAT_ID,
         text="\n".join(lines),
         reply_markup=keyboard,
     )
+    return msg
 
 
-def _notify_timeout():
+def _notify_timeout(mode: str = "multi"):
+    """타임아웃 시 버튼 제거 후 텍스트 교체."""
+    timeout_text = "⏰ 응답 시간 초과 — 이번 라운드를 건너뜁니다."
+
+    state  = _state if mode == "single" else _multi_state
+    msg_id = state.get("msg_id")
+
+    async def _edit_and_notify():
+        from telegram import Bot
+        bot = Bot(token=BOT_TOKEN)
+        async with bot:
+            if msg_id:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=CHAT_ID,
+                        message_id=msg_id,
+                        text=timeout_text,
+                        reply_markup=None,
+                    )
+                    return
+                except Exception:
+                    pass
+            # 버튼 제거 실패 시 새 메시지로 폴백
+            await bot.send_message(chat_id=CHAT_ID, text=timeout_text)
+
     try:
-        asyncio.run(_send_text("⏰ 응답 없음 — 이번 라운드를 건너뜁니다."))
+        asyncio.run(_edit_and_notify())
     except Exception:
         pass
 
@@ -447,7 +667,13 @@ def _run_partial_sell_bot(positions):
 async def _partial_sell_main(positions):
     from telegram.ext import Application, CallbackQueryHandler
     _reset_polling()   # 이전 polling 세션 강제 종료
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .connect_timeout(10)
+        .read_timeout(10)
+        .build()
+    )
     app.add_handler(CallbackQueryHandler(_partial_sell_handler))
     await app.initialize()
     await app.start()
