@@ -586,205 +586,226 @@ def run_scheduler():
     except Exception:
         pass
 
-    sc.print_config()
+    pm = None   # finally에서 참조하므로 try 앞에 초기화
 
-    use_telegram = _telegram_enabled()
-    print(f"  📱 텔레그램: {'ON' if use_telegram else 'OFF'}")
-    print(f"  최대 포지션: {sc.MAX_POSITIONS}개")
-    print(f"  스크리닝 주기: {sc.SCREENING_INTERVAL}분")
-    print(f"  AI 점수: {'ON' if sc.USE_AI_SCORING else 'OFF'}")
-    print(f"  자동매수 Threshold: {sc.AUTO_BUY_SCORE}점 이상")
-    print(f"  확인 요청 범위: {sc.CONFIRM_SCORE_MIN}~{sc.AUTO_BUY_SCORE}점")
+    try:
+        sc.print_config()
 
-    # 종목 풀 구성 (장 전 AI 분석용)
-    from screener import build_screening_pool
-    stock_list = build_screening_pool()
+        use_telegram = _telegram_enabled()
+        print(f"  📱 텔레그램: {'ON' if use_telegram else 'OFF'}")
+        print(f"  최대 포지션: {sc.MAX_POSITIONS}개")
+        print(f"  스크리닝 주기: {sc.SCREENING_INTERVAL}분")
+        print(f"  AI 점수: {'ON' if sc.USE_AI_SCORING else 'OFF'}")
+        print(f"  자동매수 Threshold: {sc.AUTO_BUY_SCORE}점 이상")
+        print(f"  확인 요청 범위: {sc.CONFIRM_SCORE_MIN}~{sc.AUTO_BUY_SCORE}점")
 
-    # 장 전 AI 캐시 갱신
-    _run_ai_cache_if_needed(stock_list, "장전")
+        # 종목 풀 구성 (장 전 AI 분석용)
+        from screener import build_screening_pool
+        stock_list = build_screening_pool()
 
-    wait_until_market_open()
+        # 장 전 AI 캐시 갱신
+        _run_ai_cache_if_needed(stock_list, "장전")
 
-    # 09:00 직후 KIS 서버 Rate Limit 완화 대기 (수만 건 동시 접속 분산)
-    print(f"[{get_now()}] 잔고 조회 전 5초 대기 (서버 부하 분산)...")
-    time.sleep(180)
+        wait_until_market_open()
 
-    # 포지션당 예산 (장 시작 시 1회 계산)
-    print(f"\n[{get_now()}] 포지션 예산 계산 중...")
-    budget_per_slot = calc_position_budget()
+        # 09:00 직후 KIS 서버 Rate Limit 완화 대기 (수만 건 동시 접속 분산)
+        print(f"[{get_now()}] 잔고 조회 전 5초 대기 (서버 부하 분산)...")
+        time.sleep(180)
 
-    pm = PositionManager(budget_per_slot)
-    slot_counter     = 0
-    last_screen_time = 0
-    mass_sell_sent   = set()   # 전량매도 문의를 보낸 시각 추적
+        # 포지션당 예산 (장 시작 시 1회 계산)
+        print(f"\n[{get_now()}] 포지션 예산 계산 중...")
+        budget_per_slot = calc_position_budget()
 
-    # 재시작 시 기존 보유 포지션 복구
-    print(f"\n[{get_now()}] 기존 포지션 복구 확인 중...")
-    restore_positions(pm)
+        pm = PositionManager(budget_per_slot)
+        slot_counter     = 0
+        last_screen_time = 0
+        mass_sell_sent   = set()   # 전량매도 문의를 보낸 시각 추적
 
-    # 보유 종목 수익률 정기 알림 스레드 시작
-    _start_alert_thread(pm)
+        # 재시작 시 기존 보유 포지션 복구
+        print(f"\n[{get_now()}] 기존 포지션 복구 확인 중...")
+        restore_positions(pm)
 
-    # 텔레그램 수동 매수 모니터 시작 (6자리 코드 메시지 → 즉시 매수)
-    if _telegram_enabled():
-        from telegram_bot import start_manual_buy_monitor
-        start_manual_buy_monitor(pm, budget_per_slot, stop_event=_get_stop_event())
-        print(f"[{get_now()}] 📱 수동매수 모니터 시작 — 종목코드 6자리 메시지로 즉시 매수 가능")
+        # 보유 종목 수익률 정기 알림 스레드 시작
+        _start_alert_thread(pm)
 
-    while True:
-        now_hhmm = datetime.now().strftime("%H:%M")
+        # 텔레그램 수동 매수 모니터 시작 (6자리 코드 메시지 → 즉시 매수)
+        if _telegram_enabled():
+            from telegram_bot import start_manual_buy_monitor
+            start_manual_buy_monitor(pm, budget_per_slot, stop_event=_get_stop_event())
+            print(f"[{get_now()}] 📱 수동매수 모니터 시작 — 종목코드 6자리 메시지로 즉시 매수 가능")
 
-        # 외부 정지 신호 (app.py 정지 버튼)
-        if stop_ev.is_set():
-            print(f"\n[{get_now()}] ⏹ 정지 요청 수신 — 모니터링 중단 (포지션 KIS 유지)")
-            break
+        while True:
+            now_hhmm = datetime.now().strftime("%H:%M")
 
-        # 종료 조건
-        if is_force_sell_time():
-            print(f"\n[{get_now()}] ⏰ 강제 청산 시간 — 신규 진입 중단, 기존 포지션 청산 대기")
-            break
+            # 외부 정지 신호 (app.py 정지 버튼)
+            if stop_ev.is_set():
+                print(f"\n[{get_now()}] ⏹ 정지 요청 수신 — 모니터링 중단 (포지션 KIS 유지)")
+                break
 
-        if pm.trade_count >= sc.MAX_TRADES_PER_DAY:
-            print(f"\n[{get_now()}] 최대 매매 횟수({sc.MAX_TRADES_PER_DAY}회) 도달")
-            break
+            # 종료 조건
+            if is_force_sell_time():
+                print(f"\n[{get_now()}] ⏰ 강제 청산 시간 — 신규 진입 중단, 기존 포지션 청산 대기")
+                break
 
-        # ── 14:00 / 14:30 전량매도 문의 ──
-        for q_time in sc.MASS_SELL_QUERY_TIMES:
-            if now_hhmm >= q_time and q_time not in mass_sell_sent:
-                mass_sell_sent.add(q_time)
-                if pm.active and use_telegram:
-                    _handle_mass_sell_query(pm, q_time)
+            if pm.trade_count >= sc.MAX_TRADES_PER_DAY:
+                print(f"\n[{get_now()}] 최대 매매 횟수({sc.MAX_TRADES_PER_DAY}회) 도달")
+                break
 
-        # ── 스크리닝 종료 시각 이후 신규 진입 중단 ──
-        if now_hhmm >= sc.SCREENING_END_TIME:
-            print(f"[{get_now()}] 스크리닝 종료 시각({sc.SCREENING_END_TIME}) 이후 — 신규 진입 없음", end="\r")
-            time.sleep(30)
-            continue
+            # ── 14:00 / 14:30 전량매도 문의 ──
+            for q_time in sc.MASS_SELL_QUERY_TIMES:
+                if now_hhmm >= q_time and q_time not in mass_sell_sent:
+                    mass_sell_sent.add(q_time)
+                    if pm.active and use_telegram:
+                        _handle_mass_sell_query(pm, q_time)
 
-        # 빈 슬롯 없으면 대기
-        if pm.free_slots <= 0:
-            print(f"[{get_now()}] 포지션 풀 ({sc.MAX_POSITIONS}/{sc.MAX_POSITIONS}) — 대기 중...", end="\r")
-            time.sleep(10)
-            continue
+            # ── 스크리닝 종료 시각 이후 신규 진입 중단 ──
+            if now_hhmm >= sc.SCREENING_END_TIME:
+                print(f"[{get_now()}] 스크리닝 종료 시각({sc.SCREENING_END_TIME}) 이후 — 신규 진입 없음", end="\r")
+                time.sleep(30)
+                continue
 
-        # SCREENING_INTERVAL 분 경과 시에만 스크리닝
-        now_ts = time.time()
-        if now_ts - last_screen_time < sc.SCREENING_INTERVAL * 60:
-            remaining = int(sc.SCREENING_INTERVAL * 60 - (now_ts - last_screen_time))
-            print(f"[{get_now()}] 다음 스크리닝까지 {remaining}초 | "
-                  f"활성 포지션: {len(pm.active)}/{sc.MAX_POSITIONS}", end="\r")
-            time.sleep(10)
-            continue
+            # 빈 슬롯 없으면 대기
+            if pm.free_slots <= 0:
+                print(f"[{get_now()}] 포지션 풀 ({sc.MAX_POSITIONS}/{sc.MAX_POSITIONS}) — 대기 중...", end="\r")
+                time.sleep(10)
+                continue
 
-        # ── 스크리닝 ──
-        print(f"\n[{get_now()}] 스크리닝 시작... (빈 슬롯: {pm.free_slots}개)")
-        screened = run_screening(stop_event=stop_ev)   # 정지 신호 전달 → 즉시 중단 가능
-        last_screen_time = time.time()
+            # SCREENING_INTERVAL 분 경과 시에만 스크리닝
+            now_ts = time.time()
+            if now_ts - last_screen_time < sc.SCREENING_INTERVAL * 60:
+                remaining = int(sc.SCREENING_INTERVAL * 60 - (now_ts - last_screen_time))
+                print(f"[{get_now()}] 다음 스크리닝까지 {remaining}초 | "
+                      f"활성 포지션: {len(pm.active)}/{sc.MAX_POSITIONS}", end="\r")
+                time.sleep(10)
+                continue
 
-        # 필터: 쿨다운 제외 + 이미 보유 중 제외
-        candidates = [
-            s for s in screened
-            if s["code"] not in pm.active and not pm.in_cooldown(s["code"])
-        ]
+            # ── 스크리닝 ──
+            print(f"\n[{get_now()}] 스크리닝 시작... (빈 슬롯: {pm.free_slots}개)")
+            screened = run_screening(stop_event=stop_ev)   # 정지 신호 전달 → 즉시 중단 가능
+            last_screen_time = time.time()
 
-        if not candidates:
-            print(f"[{get_now()}] 조건 충족 종목 없음 — {sc.SCREENING_INTERVAL}분 후 재스크리닝")
-            continue
+            # 필터: 쿨다운 제외 + 이미 보유 중 제외
+            candidates = [
+                s for s in screened
+                if s["code"] not in pm.active and not pm.in_cooldown(s["code"])
+            ]
 
-        # ── 오후 1시 AI 캐시 갱신 체크 ──
-        _run_ai_cache_if_needed(stock_list, "오후1시")
+            if not candidates:
+                print(f"[{get_now()}] 조건 충족 종목 없음 — {sc.SCREENING_INTERVAL}분 후 재스크리닝")
+                continue
 
-        # ── AI 점수 계산 + 라우팅 분류 ──
-        auto_list    = []
-        confirm_list = []
-        screen_round = getattr(pm, "_screen_round", 0) + 1
-        pm._screen_round = screen_round
+            # ── 오후 1시 AI 캐시 갱신 체크 ──
+            _run_ai_cache_if_needed(stock_list, "오후1시")
 
-        for cand in candidates:
-            score_dict, route = _score_and_route(cand)
-            cand["score"]        = score_dict["total"]
-            cand["score_detail"] = score_dict
-            cand["route"]        = route
-            print(f"  {cand['name']:12s} 총점: {score_dict['total']:3d}점 "
-                  f"(기술:{score_dict['tech']} LLM:{score_dict['llm']} DART:{score_dict['dart']}) "
-                  f"→ {route}")
-            if route == "auto_buy":
-                auto_list.append(cand)
-            elif route == "confirm":
-                confirm_list.append(cand)
+            # ── AI 점수 계산 + 라우팅 분류 ──
+            auto_list    = []
+            confirm_list = []
+            screen_round = getattr(pm, "_screen_round", 0) + 1
+            pm._screen_round = screen_round
 
-        # 스크리닝 결과 로그
-        tlog.log_screening(screen_round, auto_list + confirm_list)
+            for cand in candidates:
+                score_dict, route = _score_and_route(cand)
+                cand["score"]        = score_dict["total"]
+                cand["score_detail"] = score_dict
+                cand["route"]        = route
+                print(f"  {cand['name']:12s} 총점: {score_dict['total']:3d}점 "
+                      f"(기술:{score_dict['tech']} LLM:{score_dict['llm']} DART:{score_dict['dart']}) "
+                      f"→ {route}")
+                if route == "auto_buy":
+                    auto_list.append(cand)
+                elif route == "confirm":
+                    confirm_list.append(cand)
+
+            # 스크리닝 결과 로그
+            tlog.log_screening(screen_round, auto_list + confirm_list)
+            try:
+                from telegram_alarm import notify_screening_result
+                notify_screening_result(screen_round, auto_list + confirm_list)
+            except Exception:
+                pass
+
+            # ── 자동 매수 ──
+            for stock in auto_list:
+                if pm.free_slots <= 0 or pm.trade_count >= sc.MAX_TRADES_PER_DAY:
+                    break
+                print(f"\n[{get_now()}] 🤖 자동 매수: {stock['name']} ({stock['score']}점)")
+                slot_counter += 1
+                pm.open(stock, slot_counter)
+                if use_telegram:
+                    from telegram_bot import notify
+                    d = stock["score_detail"]
+                    notify(f"🤖 자동 매수\n{stock['name']} — {stock['score']}점\n"
+                           f"기술:{d['tech']} LLM:{d['llm']} DART:{d['dart']}")
+                time.sleep(1)
+
+            # ── 텔레그램 확인 요청 ──
+            if confirm_list and pm.free_slots > 0:
+                if use_telegram:
+                    from telegram_bot import send_and_wait_multi, notify
+                    free = pm.free_slots
+                    tlog.log_confirm_sent(confirm_list[:5])
+                    notify(f"📊 포지션: {len(pm.active)}/{sc.MAX_POSITIONS}개 활성\n"
+                           f"빈 슬롯 {free}개 — 최대 {free}개 선택 가능합니다.")
+                    selected_list = send_and_wait_multi(
+                        confirm_list[:5],
+                        max_select=free,
+                        timeout=sc.TELEGRAM_CONFIRM_TIMEOUT,
+                    )
+                    if selected_list == "RESTART":
+                        print(f"[{get_now()}] 🔄 텔레그램 재시작 요청 — 즉시 재스크리닝")
+                        last_screen_time = 0
+                        continue
+                    elif selected_list == "PASS":
+                        print(f"[{get_now()}] ⏭ 패스")
+                    elif not selected_list:
+                        print(f"[{get_now()}] ⏰ 응답 없음 — 이번 라운드 패스")
+                    else:
+                        for sel in selected_list:
+                            if pm.free_slots <= 0:
+                                break
+                            target = next((s for s in confirm_list if s["code"] == sel["code"]), None)
+                            if target:
+                                tlog.log_confirm_selected(target)
+                                slot_counter += 1
+                                pm.open(target, slot_counter)
+                                time.sleep(0.5)
+                else:
+                    # 텔레그램 없으면 confirm도 자동 진입
+                    for stock in confirm_list:
+                        if pm.free_slots <= 0:
+                            break
+                        slot_counter += 1
+                        pm.open(stock, slot_counter)
+                        time.sleep(1)
+
+        # while 루프 정상 탈출 → 정상 종료
+        from trading_state import clear_state
+        clear_state()
+
+    except KeyboardInterrupt:
+        print(f"\n[{get_now()}] 사용자 중지 (Ctrl+C) — 정상 종료 처리")
         try:
-            from telegram_alarm import notify_screening_result
-            notify_screening_result(screen_round, auto_list + confirm_list)
+            from trading_state import clear_state
+            from telegram_alarm import notify_alarm
+            clear_state()
+            notify_alarm("⏹ 트레이딩 수동 종료 (Ctrl+C)")
         except Exception:
             pass
 
-        # ── 자동 매수 ──
-        for stock in auto_list:
-            if pm.free_slots <= 0 or pm.trade_count >= sc.MAX_TRADES_PER_DAY:
-                break
-            print(f"\n[{get_now()}] 🤖 자동 매수: {stock['name']} ({stock['score']}점)")
-            slot_counter += 1
-            pm.open(stock, slot_counter)
-            if use_telegram:
-                from telegram_bot import notify
-                d = stock["score_detail"]
-                notify(f"🤖 자동 매수\n{stock['name']} — {stock['score']}점\n"
-                       f"기술:{d['tech']} LLM:{d['llm']} DART:{d['dart']}")
-            time.sleep(1)
+    except Exception as e:
+        # 예기치 못한 오류 → running=True 유지 (워치독이 비정상 종료로 감지)
+        print(f"\n[{get_now()}] 🚨 예외 발생: {e}")
+        try:
+            from telegram_alarm import notify_alarm
+            notify_alarm(f"🚨 트레이딩 비정상 종료\n오류: {e}")
+        except Exception:
+            pass
+        raise
 
-        # ── 텔레그램 확인 요청 ──
-        if confirm_list and pm.free_slots > 0:
-            if use_telegram:
-                from telegram_bot import send_and_wait_multi, notify
-                free = pm.free_slots
-                tlog.log_confirm_sent(confirm_list[:5])
-                notify(f"📊 포지션: {len(pm.active)}/{sc.MAX_POSITIONS}개 활성\n"
-                       f"빈 슬롯 {free}개 — 최대 {free}개 선택 가능합니다.")
-                selected_list = send_and_wait_multi(
-                    confirm_list[:5],
-                    max_select=free,
-                    timeout=sc.TELEGRAM_CONFIRM_TIMEOUT,
-                )
-                if selected_list == "RESTART":
-                    print(f"[{get_now()}] 🔄 텔레그램 재시작 요청 — 즉시 재스크리닝")
-                    last_screen_time = 0
-                    continue
-                elif selected_list == "PASS":
-                    print(f"[{get_now()}] ⏭ 패스")
-                elif not selected_list:
-                    print(f"[{get_now()}] ⏰ 응답 없음 — 이번 라운드 패스")
-                else:
-                    for sel in selected_list:
-                        if pm.free_slots <= 0:
-                            break
-                        target = next((s for s in confirm_list if s["code"] == sel["code"]), None)
-                        if target:
-                            tlog.log_confirm_selected(target)
-                            slot_counter += 1
-                            pm.open(target, slot_counter)
-                            time.sleep(0.5)
-            else:
-                # 텔레그램 없으면 confirm도 자동 진입
-                for stock in confirm_list:
-                    if pm.free_slots <= 0:
-                        break
-                    slot_counter += 1
-                    pm.open(stock, slot_counter)
-                    time.sleep(1)
-
-    # 기존 포지션 스레드 종료 대기
-    print(f"\n[{get_now()}] 모든 포지션 종료 대기 중...")
-    for t in list(pm.active.values()):
-        t.join(timeout=300)  # 최대 5분 대기
-
-    pm.print_summary()
-
-    # 정상 종료 — 상태 파일 초기화
-    try:
-        from trading_state import clear_state
-        clear_state()
-    except Exception:
-        pass
+    finally:
+        # 포지션 스레드 종료 대기 — 정상/비정상 무관하게 항상 실행
+        if pm is not None:
+            print(f"\n[{get_now()}] 모든 포지션 종료 대기 중...")
+            for t in list(pm.active.values()):
+                t.join(timeout=300)
+            pm.print_summary()
