@@ -87,6 +87,52 @@ def notify_sell_filled(name: str, buy_price: int, sell_price: int,
 # 보유 종목 수익률 정기 알림 ⓐ
 # ──────────────────────────────────────────
 
+def notify_screening_result(round_no: int, candidates: list):
+    """스크리닝 결과를 알람봇으로 전송"""
+    if not _enabled():
+        return
+    from datetime import datetime
+    now = datetime.now().strftime("%H:%M")
+
+    try:
+        from watchlist import WATCHLIST_CODES as _WL
+    except Exception:
+        _WL = set()
+
+    route_emoji = {
+        "auto_buy": "🤖",
+        "confirm":  "📱",
+        "skip":     "⏭",
+    }
+
+    if not candidates:
+        notify_alarm(f"🔍 스크리닝 #{round_no}  {now}\n\n조건 충족 종목 없음")
+        return
+
+    lines = [f"🔍 스크리닝 #{round_no}  {now}\n"]
+    for cand in candidates:
+        d        = cand.get("score_detail") or {}
+        tech     = d.get("tech",  0)
+        llm      = d.get("llm",   0)
+        dart     = d.get("dart",  0)
+        bull     = d.get("strong_bull", 0) or (15 if cand.get("시간봉패턴") == "strong_bull" else 0)
+        wl_score = 5 if cand.get("code") in _WL else 0
+        total    = cand.get("score", 0)
+        grade    = cand.get("grade", "B")
+        gap      = cand.get("돌파여유율", 0)
+        route    = cand.get("route", "")
+        emoji    = route_emoji.get(route, "🔍")
+
+        lines.append(
+            f"{emoji} {cand['name']} ({cand['code']})\n"
+            f"   총점: {total}점 (기술:{tech} LLM:{llm} DART:{dart} 강세봉:{bull} WL:{wl_score})\n"
+            f"   여유율: {gap:+.2f}%  등급: {grade}"
+        )
+        lines.append("")
+
+    notify_alarm("\n".join(lines).rstrip())
+
+
 def notify_position_status(positions: list):
     """
     positions: [{"name","buy_price","current_price","quantity"}, ...]
