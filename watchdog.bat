@@ -3,7 +3,7 @@
 @REM ================================================================
 @REM Task Scheduler setup (run on startup):
 @REM   Program  : cmd.exe
-@REM   Arguments: /c "C:\Users\akqjq.DESKTOP-S2DK953\Desktop\#Stock Auto\1. Practice\kis_trader\watchdog.bat"
+@REM   Arguments: /c "C:\KIS_Trader\1. Practice\kis_trader\watchdog.bat"
 @REM   Check "Run with highest privileges"
 @REM ================================================================
 
