@@ -302,22 +302,57 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
             error_count += 1
             print(f"\n[{get_now()}] {tag} ⚠️ API 오류 ({error_count}/{MAX_ERRORS}): {e}")
 
-            # 재시도해도 해결 안 되는 오류 → 즉시 슬롯 반환
-            FATAL_BUY_ERRORS = ("주문가능금액을 초과", "잔고부족", "증거금 부족", "매수가능금액 초과")
-            if not bought and any(kw in err_msg for kw in FATAL_BUY_ERRORS):
-                print(f"\n[{get_now()}] {tag} 🚫 매수 불가 오류 — 슬롯 반환 (예산 재조정 필요)")
+            # 주문가능금액 초과 → 실제 잔액으로 수량 재계산 후 1회 재시도
+            BUDGET_ERRORS = ("주문가능금액을 초과", "매수가능금액 초과", "잔고부족", "증거금 부족")
+            if not bought and any(kw in err_msg for kw in BUDGET_ERRORS):
                 try:
-                    from telegram_alarm import notify_alarm
-                    notify_alarm(
-                        f"🚫 [{stock_name}] 매수 불가\n"
-                        f"사유: {err_msg}\n"
-                        f"슬롯 반환 — 예산 확인 필요"
-                    )
-                except Exception:
-                    pass
-                if on_close:
-                    on_close("매수불가", stock_code)
-                return
+                    from api import get_balance as _gb
+                    _bal = _gb()
+                    _avail = int(float(_bal["계좌요약"][0].get("ord_psbl_cash", 0)))
+                    if _avail <= 0:
+                        _avail = int(float(_bal["계좌요약"][0].get("dnca_tot_amt", 0)))
+                    _new_qty = _avail // current_price if current_price > 0 else 0
+                    print(f"\n[{get_now()}] {tag} 💰 주문가능금액 {_avail:,}원 → 수량 재조정 {quantity}주 → {_new_qty}주")
+                    if _new_qty >= 1:
+                        buy_stock(stock_code, _new_qty)
+                        quantity   = _new_qty
+                        buy_price  = current_price
+                        peak_price = current_price
+                        bought     = True
+                        print(f"  {tag} 매수 @ {buy_price:,}원 × {quantity}주 (수량 재조정)")
+                        tlog.log_buy(stock_code, stock_name, buy_price, quantity, budget, slot_no)
+                        try:
+                            from telegram_alarm import notify_buy_filled
+                            notify_buy_filled(stock_name, buy_price, quantity)
+                        except Exception:
+                            pass
+                        if on_close and hasattr(on_close, '__self__'):
+                            on_close.__self__.register_buy(stock_code, stock_name, buy_price, quantity)
+                        if on_buy:
+                            try:
+                                on_buy(stock_code)
+                            except Exception:
+                                pass
+                        error_count = 0
+                    else:
+                        print(f"\n[{get_now()}] {tag} 🚫 주문가능금액 부족 ({_avail:,}원) — 슬롯 반환")
+                        try:
+                            from telegram_alarm import notify_alarm
+                            notify_alarm(
+                                f"🚫 [{stock_name}] 주문가능금액 부족\n"
+                                f"가용금액: {_avail:,}원 / 필요: {current_price:,}원 × 1주\n"
+                                f"슬롯 반환"
+                            )
+                        except Exception:
+                            pass
+                        if on_close:
+                            on_close("매수불가", stock_code)
+                        return
+                except Exception as _retry_err:
+                    print(f"\n[{get_now()}] {tag} 수량 재조정 실패: {_retry_err}")
+                    if on_close:
+                        on_close("매수불가", stock_code)
+                    return
 
             # 연속 에러 한도 초과 → 보유 중이면 강제 청산 후 종료
             if error_count >= MAX_ERRORS:
