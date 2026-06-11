@@ -322,26 +322,42 @@ if "recovery_checked" not in st.session_state:
         _rs = load_state()
         if _rs.get("running"):
             # PID 비교: 같은 PID면 F5 새로고침 → 복구 불필요
-            _saved_pid   = _rs.get("pid")
+            _saved_pid    = _rs.get("pid")
             _same_process = (_saved_pid is not None and _saved_pid == _os.getpid())
+
+            # 저장된 PID 프로세스가 실제로 살아있는지 확인 (Windows: tasklist)
+            _pid_alive = False
+            if _saved_pid and not _same_process:
+                try:
+                    import subprocess as _sp
+                    _r = _sp.run(
+                        ["tasklist", "/fi", f"PID eq {_saved_pid}", "/fo", "csv", "/nh"],
+                        capture_output=True, text=True, timeout=3
+                    )
+                    _pid_alive = str(_saved_pid) in _r.stdout
+                except Exception:
+                    _pid_alive = False
 
             # 날짜 비교: 전날(재부팅 전 세션) 상태면 crash 아님
             from datetime import date as _date
-            _updated_at = _rs.get("updated_at", "")
+            _updated_at  = _rs.get("updated_at", "")
             _state_today = _updated_at[:10] == str(_date.today()) if _updated_at else False
 
+            from trading_state import clear_state
             if _same_process:
                 pass  # F5 새로고침 — 정상 실행 중
+            elif not _pid_alive:
+                # 저장된 PID가 이미 죽음 → 정상/비정상 종료 후 남은 상태
+                clear_state()
+                st.session_state["recovery_mode"] = False
             elif not _state_today:
-                # 전날 또는 날짜 없음 → 재부팅으로 인한 정상 종료
-                from trading_state import clear_state
+                # 전날 기록 → 재부팅으로 인한 정상 종료
                 clear_state()
                 st.session_state["recovery_mode"] = False
             elif is_market_hours():
                 st.session_state["recovery_mode"]      = True
                 st.session_state["recovery_mode_last"] = _rs.get("mode", "mock")
             else:
-                from trading_state import clear_state
                 clear_state()
                 st.session_state["recovery_mode"] = False
     except Exception:
