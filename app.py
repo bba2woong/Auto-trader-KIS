@@ -133,9 +133,16 @@ if _RECOVERY_COUNT_KEY not in sys.modules:
 def _start_scheduler(mode: str):
     """config 재로드 → sys.stdout 교체 → scheduler 백그라운드 실행"""
     # 프로세스 레벨 lock — Streamlit rerun 중복 호출 방지
-    if not _sched_lock.acquire(blocking=False):
-        return  # 이미 다른 rerun이 시작 중
-    # 스레드가 살아있으면 즉시 해제 후 종료
+    # 정지 후 재시작 시 이전 스레드가 종료되기까지 최대 15초 대기
+    if not _sched_lock.acquire(timeout=15):
+        print("[Scheduler] 이전 스케줄러 종료 대기 시간 초과 — 강제 해제 후 재시작")
+        try:
+            _sched_lock.release()
+        except RuntimeError:
+            pass
+        if not _sched_lock.acquire(blocking=False):
+            return
+    # 스레드가 여전히 살아있으면(정지 처리 중) 즉시 해제 후 종료
     existing_thread = st.session_state.get("trader_thread")
     if existing_thread and existing_thread.is_alive():
         _sched_lock.release()
@@ -719,11 +726,14 @@ with tab_trade:
             from trading_state import clear_state as _clear_state
             _get_stop_event().set()
             _clear_state()   # 정상 종료 → 다음 재시작 시 복구 모드 미발동
+            # UI 즉시 비활성화 — 백그라운드 정리는 스레드가 계속 수행
+            st.session_state["trader_running"] = False
             _log_buf.add_history(
                 "⏹ 정지 요청 — 모니터링 중단됩니다. "
                 "보유 포지션은 KIS 계좌에 그대로 유지됩니다. "
                 "재시작 시 KIS 잔고에서 자동 복구됩니다."
             )
+            st.rerun()
 
     if not running and t_mode != "—":
         st.info("⏹ 모니터링 정지됨 — 재시작 버튼을 누르면 KIS 잔고에서 포지션을 자동 복구합니다.")
