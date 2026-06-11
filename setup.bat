@@ -135,7 +135,7 @@ schtasks /query /tn "KIS WatchDog" > nul 2>&1
 if %errorlevel% == 0 (
     schtasks /delete /tn "KIS WatchDog" /f > nul 2>&1
 )
-schtasks /create /tn "KIS WatchDog" /tr "cmd.exe /c \"%~dp0watchdog.bat\"" /sc ONLOGON /rl HIGHEST /f > nul 2>&1
+schtasks /create /tn "KIS WatchDog" /tr "\"%~dp0venv\Scripts\pythonw.exe\" \"%~dp0kis_watchdog.py\"" /sc ONLOGON /rl HIGHEST /f > nul 2>&1
 if %errorlevel% neq 0 (
     echo [경고] 작업 스케줄러 등록 실패.
     echo        관리자 권한으로 setup.bat을 다시 실행하거나,

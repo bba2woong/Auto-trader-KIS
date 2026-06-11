@@ -1,5 +1,5 @@
 """
-watchdog.py — KIS Auto Trader WatchDog (창 없이 백그라운드 실행용)
+kis_watchdog.py — KIS Auto Trader WatchDog (창 없이 백그라운드 실행용)
 Task Scheduler에서 pythonw.exe로 실행 시 CMD 창 미표시.
 """
 import sys
