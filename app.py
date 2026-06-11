@@ -120,6 +120,11 @@ if _SCHED_KEY not in sys.modules:
     sys.modules[_SCHED_KEY] = threading.Lock()
 _sched_lock: threading.Lock = sys.modules[_SCHED_KEY]
 
+# 복구 모드 진입 횟수 (프로세스 재시작 시 0으로 초기화)
+_RECOVERY_COUNT_KEY = "_kis_trader_recovery_count"
+if _RECOVERY_COUNT_KEY not in sys.modules:
+    sys.modules[_RECOVERY_COUNT_KEY] = 0
+
 
 # ──────────────────────────────────────────
 # 트레이딩 시작/정지 헬퍼
@@ -563,26 +568,34 @@ with tab_trade:
             f"3분 내 응답 없으면 **모의투자**로 자동 진입합니다."
         )
 
-        # 수동 진입 버튼 (텔레그램 응답 후 화면이 멈출 경우 대비)
-        _rc1, _rc2, _rc3 = st.columns([3, 1, 1])
-        with _rc2:
-            if st.button("모의투자로 진입", key="recovery_manual_mock"):
-                st.session_state["recovery_mode"] = False
-                st.session_state["recovery_done"] = True
-                st.session_state["trading_mode"] = "mock"
-                _start_scheduler("mock")
-                st.rerun()
-        with _rc3:
-            if st.button("실전투자로 진입", key="recovery_manual_real"):
-                st.session_state["recovery_mode"] = False
-                st.session_state["recovery_done"] = True
-                st.session_state["trading_mode"] = "real"
-                _start_scheduler("real")
-                st.rerun()
+        # 2회 이상 복구 모드 진입 시 수동 버튼 표시
+        if sys.modules.get(_RECOVERY_COUNT_KEY, 0) >= 2:
+            _rc1, _rc2, _rc3 = st.columns([3, 1, 1])
+            with _rc2:
+                if st.button("모의투자로 진입", key="recovery_manual_mock"):
+                    st.session_state["recovery_mode"] = False
+                    st.session_state["recovery_done"] = True
+                    st.session_state["trading_mode"] = "mock"
+                    if _sched_lock.locked():
+                        try: _sched_lock.release()
+                        except RuntimeError: pass
+                    _start_scheduler("mock")
+                    st.rerun()
+            with _rc3:
+                if st.button("실전투자로 진입", key="recovery_manual_real"):
+                    st.session_state["recovery_mode"] = False
+                    st.session_state["recovery_done"] = True
+                    st.session_state["trading_mode"] = "real"
+                    if _sched_lock.locked():
+                        try: _sched_lock.release()
+                        except RuntimeError: pass
+                    _start_scheduler("real")
+                    st.rerun()
 
         # 복구 스레드가 아직 시작 안 됐으면 시작
         if not st.session_state.get("recovery_thread_started"):
             st.session_state["recovery_thread_started"] = True
+            sys.modules[_RECOVERY_COUNT_KEY] = sys.modules.get(_RECOVERY_COUNT_KEY, 0) + 1
 
             def _send_recovery_query(last_mode):
                 selected_mode = "mock"
