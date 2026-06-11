@@ -24,12 +24,19 @@
 기술 스택: Python · Streamlit · Electron · Telegram API · Perplexity AI · DART API · KSI API  
 
 핵심 성과:
+
 ✅ 래리 윌리엄스 변동성 돌파 전략 기반 자동매매 구현
+
 ✅ LLM AI + Dart 공시 + 차트 분석 점수 시스템으로 종목 선별 자동화
+
 ✅ 멀티쓰레드로 최대 N개 종목 동시 포지셔닝&모니터링
+
 ✅ Electron 데스크탑 앱 + WatchDog 자동 복구
+
 ✅ Telegram Bot 이용한 원격 트레이딩 지원, 원격 매수/매도 지시 및 자동 매매
+
 ✅ Setup.bat 패키징 + Git Clone 이용한 배포 서비스 탑재 
+
 
 🏆 실전/모의투자 실제 운용 경험 - 작성 시점까지 수익률 **121%**
 
