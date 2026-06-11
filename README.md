@@ -1,7 +1,7 @@
 # 📈 KIS Auto Trader
 
-한국투자증권(KIS) Open API 기반 변동성 돌파 자동매매 시스템.
-Streamlit GUI, AI 점수 기반 종목 선별, 텔레그램 알림, 백테스팅을 지원합니다.
+한국투자증권(KIS) Open API 기반 변동성 돌파 자동매매 시스템.  
+Streamlit GUI, AI 점수 기반 종목 선별, 텔레그램 알림, 백테스팅, Electron 데스크톱 앱, WatchDog 자동 재시작을 지원합니다.
 
 ---
 
@@ -13,9 +13,11 @@ Streamlit GUI, AI 점수 기반 종목 선별, 텔레그램 알림, 백테스팅
 4. [실행 방법](#실행-방법)
 5. [파라미터 설명](#파라미터-설명)
 6. [AI 점수 시스템](#ai-점수-시스템)
-7. [백테스팅](#백테스팅)
-8. [텔레그램 연동](#텔레그램-연동)
-9. [주의사항](#주의사항)
+7. [텔레그램 연동](#텔레그램-연동)
+8. [백테스팅](#백테스팅)
+9. [WatchDog 자동 재시작](#watchdog-자동-재시작)
+10. [PC 이전 체크리스트](#pc-이전-체크리스트)
+11. [주의사항](#주의사항)
 
 ---
 
@@ -29,57 +31,67 @@ Streamlit GUI, AI 점수 기반 종목 선별, 텔레그램 알림, 백테스팅
 
 장 중 현재가가 목표가를 돌파하면 매수 진입하고, 트레일링 스탑 또는 하드 손절로 청산합니다.
 
-**종목 선별 기준**
+### 종목 선별 기준 (최대 110점)
 
-| 항목 | 조건 | 점수 |
+| 항목 | 점수 | 설명 |
 |------|------|------|
-| 기술 | 변동성 돌파 여부 + 돌파 여유율 | 최대 40점 |
-| 기술 | AD Line 상승 여부 | +15점 |
-| 기술 | 캔들 패턴 (해머) | +10점 |
-| 기술 | 60분봉 강한 양봉 | +15점 |
-| AI | Perplexity LLM 뉴스 분석 | 최대 10점 |
-| AI | DART 공시 분석 | ±10점 |
-| 가점 | 관심종목(watchlist.py) 등록 | +10점 |
-| **합계** | | **최대 110점** |
+| 변동성 돌파 | 최대 40점 | 돌파 여부 + 여유율 (낮을수록 고점수) |
+| AD Line | +15점 | 최근 5일 AD Line 상승 여부 |
+| 캔들 패턴 | +10점 | 해머 패턴 감지 시 |
+| 60분봉 강봉 | +15점 | Strong Bull 캔들 감지 시 |
+| LLM 분석 | 최대 10점 | bullish=10 / neutral=5 / bearish=0 |
+| DART 공시 | +10점 | 긍정=10 / 중립=0 / 부정=-10 |
+| 관심종목 | +10점 | watchlist.py 등록 종목 가점 |
+| **합계** | **최대 110점** | |
 
-**매수 라우팅**
+### 매수 라우팅
 
-- 85점 이상 → 자동 매수 (텔레그램 확인 없음)
-- 55~84점 → 텔레그램으로 확인 요청
-- 55점 미만 → 스킵
+- **90점 이상** → 자동 매수 (텔레그램 확인 없음)
+- **60~89점** → 텔레그램으로 확인 요청
+- **60점 미만** → 스킵
 
 ---
 
 ## 프로젝트 구조
 
 ```
-kis_trader/
+C:\KIS_Trader\1. Practice\kis_trader\
+│
 ├── app.py                  # Streamlit GUI (주 실행 파일)
 ├── main.py                 # CLI 진입점
-├── config.py               # API 키/URL 설정 (환경변수 기반)
-│                           #   QUERY_URL/KEY/SECRET: 가격조회 전용 (항상 실전서버)
-├── auth.py                 # 토큰 발급 및 캐시 (.cache/)
-│                           #   get_access_token(): 매매용 / get_query_token(): 가격조회 전용
-├── api.py                  # 잔고 조회 (Rate Limit 재시도 내장)
+├── config.py               # API 키/URL 설정 (환경변수 기반, 동적 모드 전환)
+├── auth.py                 # 토큰 발급 + 메모리/파일 캐시 + threading.Lock
+├── api.py                  # 잔고·최대주문수량 조회 (Rate Limit 자동 재시도)
 ├── order.py                # 매수/매도 주문
-├── strategy.py             # 목표가 계산, 손절/트레일링 로직
+├── strategy.py             # 목표가 계산, 손절/트레일링 로직, 수량 계산
 ├── strategy_config.py      # 전략 파라미터 설정
-├── screener.py             # 실시간 종목 스크리닝 (KOSPI200 + 관심종목)
-│                           #   일봉 캐시(_daily_cache)로 동일 데이터 중복 조회 방지
+├── screener.py             # 종목 스크리닝 (KOSPI200 + KOSDAQ150 + 관심종목)
 ├── scheduler.py            # 장중 매매 루프 (멀티포지션 스레드)
-├── telegram_bot.py         # 텔레그램 알림 및 종목 선택 UI
-│                           #   다중선택 메시지에 종목별 점수 세부내역 표시
+├── telegram_bot.py         # 텔레그램 선택봇 (종목 선택 UI, 매도 선택)
+├── telegram_alarm.py       # 텔레그램 알람봇 (단방향 체결/수익률 알림)
 ├── trading_logger.py       # 매매 이벤트 JSONL 로그
-├── watchlist.py            # 관심종목 코드 목록 (등록 시 +10점 가점)
+├── trading_state.py        # 트레이딩 상태 영속화 (WatchDog 연동)
+├── watchlist.py            # 관심종목 코드 목록
+├── watchdog.py             # WatchDog 메인 로직 (pythonw로 창 없이 실행)
+├── watchdog.bat            # WatchDog BAT (레거시 / 직접 실행용)
+├── watchdog_hidden.vbs     # WatchDog VBS 래퍼 (숨김 실행)
+│
+├── electron/               # Electron 데스크톱 앱 래퍼
+│   ├── main.js             # Electron 메인 프로세스
+│   └── package.json        # Node.js 의존성
+│
+├── assets/
+│   ├── icon.ico            # 앱 아이콘 (Windows 작업표시줄)
+│   └── icon.png            # 트레이 아이콘
 │
 ├── scoring/
-│   ├── scorer.py           # 총점 계산 + 일별 캐시 관리 (최대 110점)
+│   ├── scorer.py           # 총점 계산 + 일별 캐시 관리
 │   ├── llm_client.py       # Perplexity API 뉴스 분석
 │   └── dart_client.py      # DART 공시 분석
 │
 ├── backtest/
 │   ├── engine.py           # 일봉 백테스트 엔진
-│   ├── engine_intraday.py  # 분봉 단타 백테스트 엔진
+│   ├── engine_intraday.py  # 분봉 단타 백테스트 엔진 (params 격리)
 │   ├── screener_sim.py     # 과거 데이터 스크리닝 시뮬레이션
 │   ├── data_loader.py      # KIS API 일봉/분봉 수집
 │   ├── data_loader_yf.py   # yfinance 분봉 수집 (최근 60일)
@@ -87,9 +99,13 @@ kis_trader/
 │   └── backtest.py         # CLI 백테스트 메뉴
 │
 ├── trading_logs/           # 매매 로그 (YYYYMMDD.jsonl)
-├── .cache/                 # 토큰 캐시 (git 제외)
-├── KIS_Trader_실행.bat     # Windows 실행 스크립트
-└── .gitignore
+├── .cache/                 # 토큰 캐시, 상태 파일 (git 제외)
+│   ├── token_cache.json    # KIS API 액세스 토큰
+│   ├── trader_state.json   # 트레이딩 실행 상태 (WatchDog용)
+│   └── watchdog.log        # WatchDog 실행 로그
+└── scoring/cache/          # AI 점수 일별 캐시 (git 제외)
+    ├── daily_YYYYMMDD.json
+    └── corp_codes.json     # DART 기업코드 맵
 ```
 
 ---
@@ -98,42 +114,42 @@ kis_trader/
 
 ### 1. 필수 환경변수 (Windows 시스템 환경변수)
 
-> **API 키는 절대 파일에 저장하지 마세요.** `.env` 파일 사용 금지 — 보안을 위해 Windows 시스템 환경변수로만 관리합니다.  
-> `sysdm.cpl` → 고급 → 환경변수에서 등록 후 터미널 재시작.
+`sysdm.cpl` → 고급 → 환경변수에서 등록. **등록 후 터미널 재시작 필수.**
+
+> **보안:** `.env` 파일 사용 금지. 모든 API 키는 Windows 시스템 환경변수로만 관리합니다.
 
 ```
-# 모의투자 (주문/잔고 전용)
-KIS_MOCK_APP_KEY      = 발급받은 모의투자 AppKey
-KIS_MOCK_APP_SECRET   = 발급받은 모의투자 AppSecret
-KIS_MOCK_ACCOUNT      = 모의투자 계좌번호 (예: 12345678-01)
+# KIS API — 모의투자
+KIS_MOCK_APP_KEY
+KIS_MOCK_APP_SECRET
+KIS_MOCK_ACCOUNT        # 예: 12345678-01
 
-# 실전투자 (주문/잔고 + 가격조회 공용)
-KIS_REAL_APP_KEY      = 발급받은 실전투자 AppKey
-KIS_REAL_APP_SECRET   = 발급받은 실전투자 AppSecret
-KIS_REAL_ACCOUNT      = 실전투자 계좌번호
+# KIS API — 실전투자
+KIS_REAL_APP_KEY
+KIS_REAL_APP_SECRET
+KIS_REAL_ACCOUNT
 
-# 텔레그램 선택봇 (매수 선택 / 전량매도 문의)
-TELEGRAM_BOT_TOKEN       = BotFather에서 발급받은 토큰
-TELEGRAM_CHAT_ID         = 메시지 수신 채팅방 ID
+# 텔레그램 선택봇 (종목 선택 UI)
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
 
-# 텔레그램 알람봇 (체결 알림 / 수익률 정기 알림)
-TELEGRAM_ALARM_BOT_TOKEN = 알람봇 토큰
-TELEGRAM_ALARM_CHAT_ID   = 알람봇 수신 채팅방 ID
+# 텔레그램 알람봇 (체결/수익률 알림)
+TELEGRAM_ALARM_BOT_TOKEN
+TELEGRAM_ALARM_CHAT_ID
 
 # AI 점수 (선택)
-PERPLEXITY_API_KEY    = Perplexity API 키
-DART_API_KEY          = DART 오픈API 키
+PERPLEXITY_API_KEY
+DART_API_KEY
 ```
 
-> **모의투자 모드에서도 가격조회는 실전 서버(`openapi.koreainvestment.com:9443`)를 사용합니다.**  
-> 따라서 `KIS_REAL_APP_KEY / KIS_REAL_APP_SECRET`은 모의투자 시에도 반드시 등록해야 합니다.
+> **중요:** 가격 조회(현재가·일봉·분봉)는 모의/실전 무관하게 항상 실서버 + 실전 앱키를 사용합니다.
 
-### 2. Python 가상환경 및 패키지 설치
+### 2. Python 환경
 
 ```bash
 python -m venv venv
 venv\Scripts\activate
-pip install streamlit pandas plotly requests python-telegram-bot yfinance
+pip install -r requirements.txt
 ```
 
 ### 3. DART 기업코드 초기화 (DART 사용 시 1회)
@@ -147,14 +163,26 @@ download_corp_codes()
 
 ## 실행 방법
 
-### Streamlit GUI (권장)
+### Electron 데스크톱 앱 (권장)
+
+```
+assets/launch.vbs 더블클릭
+```
+
+Electron 앱이 실행되며, 내부적으로 Streamlit 서버를 자동 시작합니다. 브라우저 없이 독립 창으로 실행됩니다.
+
+#### Electron 초기 설치 (최초 1회)
 
 ```bash
-# Windows
-KIS_Trader_실행.bat 더블클릭
+cd electron
+npm install
+```
 
-# 또는 직접 실행
-streamlit run app.py
+### Streamlit 직접 실행
+
+```bash
+# 단순 실행
+KIS_Trader_실행.bat 더블클릭
 ```
 
 브라우저에서 `http://localhost:8501` 접속.
@@ -163,71 +191,128 @@ streamlit run app.py
 
 ```bash
 python main.py
-# 1: 모의투자 / 2: 실전투자 / 3: 백테스팅 선택
+# 1: 모의투자 / 2: 실전투자 / 3: 백테스팅
+```
+
+### 동작 확인 테스트
+
+```bash
+python test_trade.py      # KIS API 연결 확인
+python test_telegram.py   # 텔레그램 연결 확인
+python test_scoring.py    # AI 점수 시스템 확인
 ```
 
 ---
 
 ## 파라미터 설명
 
-`strategy_config.py` 또는 Streamlit 사이드바에서 조정합니다.
+`strategy_config.py` 또는 Streamlit 사이드바에서 조정합니다.  
 사이드바 변경은 런타임에만 반영되며, 영구 저장은 `strategy_config.py` 직접 수정이 필요합니다.
+
+### 핵심 파라미터
 
 | 파라미터 | 기본값 | 설명 |
 |----------|--------|------|
-| `K` | 0.4 | 변동성 계수. 낮을수록 빠른 진입, 높을수록 보수적 (권장: 0.3~0.7) |
+| `K` | 0.4 | 변동성 계수. 낮을수록 빠른 진입 (권장: 0.3~0.7) |
 | `INVEST_RATIO` | 1.0 | 예수금 중 투자 비율 |
-| `LOSS_RATE` | 0.023 | 하드 손절 기준 (-2.3%). 트레일링 스탑과 무관하게 항상 작동 |
+| `LOSS_RATE` | 0.023 | 하드 손절 (-2.3%). 트레일링 스탑과 무관하게 항상 작동 |
 | `TRAILING_STOP_RATE` | 0.03 | 고점 대비 하락률 (-3%) 시 청산 |
 | `TRAILING_STOP_ACTIVATE_RATE` | 0.04 | 트레일링 스탑 활성화 최소 수익률 (+4%) |
-| `MAX_POSITIONS` | 5 | 동시 보유 최대 포지션 수. 예산을 이 수로 나눔 |
+
+### 시간 설정
+
+| 파라미터 | 기본값 | 설명 |
+|----------|--------|------|
+| `FORCE_SELL_TIME` | 15:00 | 강제 청산 시각 |
+| `SCREENING_END_TIME` | 14:00 | 신규 진입 마감 시각 |
+| `CHECK_INTERVAL` | 20초 | 시세 체크 주기 |
+| `SCREENING_INTERVAL` | 10분 | 스크리닝 반복 주기 |
+| `MASS_SELL_QUERY_TIMES` | 13:30, 14:00, 14:30 | 전량 매도 문의 시각 |
+
+### 포지션 / 스크리닝
+
+| 파라미터 | 기본값 | 설명 |
+|----------|--------|------|
+| `MAX_POSITIONS` | 5 | 동시 보유 최대 포지션 수 |
 | `MAX_TRADES_PER_DAY` | 10 | 하루 최대 매매 횟수 |
-| `KOSPI_POOL_SIZE` | 150 | 코스피200에서 스크리닝할 종목 수 |
-| `KOSDAQ_POOL_SIZE` | 10 | 코스닥150에서 스크리닝할 종목 수 (0이면 비활성화) |
-| `SCREENING_INTERVAL` | 10 | 스크리닝 주기 (분) |
-| `MAX_BREAKOUT_GAP` | 1.0 | 돌파 직후 진입 허용 여유율 (%). 이 이상이면 고점 진입으로 보류 |
-| `AUTO_BUY_SCORE` | 85 | 자동 매수 점수 기준 (최대 110점) |
-| `CONFIRM_SCORE_MIN` | 55 | 텔레그램 확인 요청 최소 점수 |
-| `MASS_SELL_QUERY_TIMES` | `["13:30","14:00","14:30"]` | 전량 매도 문의 시각 |
+| `KOSPI_POOL_SIZE` | 150 | 코스피200 스크리닝 종목 수 |
+| `KOSDAQ_POOL_SIZE` | 10 | 코스닥150 스크리닝 종목 수 |
+| `MAX_BREAKOUT_GAP` | 1.0% | 돌파 직후 진입 허용 여유율 상한 |
+| `SAME_STOCK_COOLDOWN` | 100초 | 동일 종목 재매매 쿨다운 |
+| `POSITION_ALERT_INTERVAL` | 20분 | 수익률 정기 알림 주기 |
+
+### AI / 텔레그램
+
+| 파라미터 | 기본값 | 설명 |
+|----------|--------|------|
+| `AUTO_BUY_SCORE` | 90 | 자동 매수 기준 점수 |
+| `CONFIRM_SCORE_MIN` | 60 | 텔레그램 확인 요청 최소 점수 |
+| `TELEGRAM_CONFIRM_TIMEOUT` | 300초 | 텔레그램 선택 대기 시간 |
 
 ---
 
 ## AI 점수 시스템
 
-### 점수 구성 (총 110점)
-
-```
-기술점수 (최대 80점)
-  ├── 변동성 돌파: 최대 40점 (돌파 여유율에 따라 선형 감소)
-  ├── AD Line 상승: +15점
-  ├── 캔들 패턴: +10점 (해머)
-  └── 60분봉 강한 양봉: +15점
-
-AI 점수 (최대 20점)
-  ├── LLM (Perplexity): bullish=10 / neutral=5 / bearish=0
-  └── DART 공시: 긍정=+10 / 중립=0 / 부정=-10
-
-관심종목 가점
-  └── watchlist.py 등록 종목: +10점
-```
-
-`USE_AI_SCORING = False`로 설정하면 기술 점수(80점 만점)만 사용하며,
-Threshold도 자동으로 0.7배 스케일링됩니다.
-
 ### 캐시 갱신 시점
 
-스케줄러 실행 중 아래 시각에 LLM + DART 분석이 자동 갱신됩니다.
-
-- 08:30 (장 전)
-- 10:00
-- 12:00
+스케줄러 실행 중 아래 시각에 자동 갱신:
+- **08:30** (장 전)
+- **10:00**
+- **12:00**
 
 캐시 파일: `scoring/cache/daily_YYYYMMDD.json`
 
-### 관심종목 가점
+### LLM 분석 (Perplexity sonar)
 
-`watchlist.py`에 등록된 종목 코드는 스크리닝 통과 시 자동으로 **+10점** 가산됩니다.
-별도 설정 없이 `WATCHLIST_CODES` 리스트에 6자리 코드만 추가하면 됩니다.
+- 스크리닝 풀 전체 종목을 5개씩 묶어 Perplexity API에 전송
+- 최근 3일 뉴스 + 시장 동향 기반 방향성 판단
+- `bullish=10점 / neutral=5점 / bearish=0점`
+- API 키 미설정 시 전체 neutral(5점) 처리
+
+### DART 공시 분석
+
+- 최근 3일 공시 제목을 긍정/부정 키워드로 분석
+- 긍정(수주, 계약, 흑자전환 등): +10점
+- 부정(적자전환, 횡령, 유상증자 등): -10점
+- 최초 실행 시 `download_corp_codes()` 1회 필요
+
+---
+
+## 텔레그램 연동
+
+### 봇 구조 (2개 봇 분리)
+
+| 봇 | 환경변수 | 역할 |
+|---|---|---|
+| 선택봇 | `TELEGRAM_BOT_TOKEN` | 종목 선택 UI, 매도 종목 선택, 재시작 모드 선택 |
+| 알람봇 | `TELEGRAM_ALARM_BOT_TOKEN` | 매수/매도 체결 알림, 수익률 정기 알림, 스크리닝 결과 로그 |
+
+### 주요 알림 항목
+
+- 스크리닝 결과 (라운드별 종목별 점수 현황)
+- 매수 체결 (종목명, 체결가, 수량, 투자금)
+- 매도 체결 (청산 사유, 수익률, 손익)
+- 보유 종목 수익률 (20분 주기)
+- 13:30 / 14:00 / 14:30 매도 종목 선택 문의
+- 비정상 종료 감지 및 재시작 모드 선택
+- 매수 대기 1시간 초과 시 슬롯 반환 알림
+- 주문가능금액 부족 시 수량 재조정 알림
+- HTS 수동 매수 종목 자동 모니터링 시작 알림
+
+### 텔레그램 명령어
+
+| 명령 | 동작 |
+|------|------|
+| `종목코드 6자리` (예: `005930`) | 해당 종목 즉시 수동 매수 |
+| `sell` | 현재 보유 포지션 매도 선택 창 즉시 표시 |
+
+### 설정 방법
+
+1. BotFather에서 봇 2개 생성 → 각각 토큰 발급
+2. `@userinfobot`으로 Chat ID 확인
+3. 환경변수 등록 후 `python test_telegram.py`로 테스트
+
+> **주의:** 같은 토큰으로 2개 프로세스가 polling하면 Conflict 오류 발생. 반드시 1개 프로세스만 실행.
 
 ---
 
@@ -235,152 +320,151 @@ Threshold도 자동으로 0.7배 스케일링됩니다.
 
 ### 유형
 
-| 유형 | 데이터 | 적합 용도 |
-|------|--------|-----------|
+| 유형 | 데이터 | 용도 |
+|------|--------|------|
 | 일봉 (daily) | KIS API 일봉 | 장기 전략 검증, K값 최적화 |
 | 분봉 단타 (intraday) | yfinance 분봉 | 단타 전략 검증, 파라미터 그리드 서치 |
 
 ### 분봉 데이터 제한
 
-- 1분봉: 최근 7일 이내
+- 1분봉: 최근 7일 이내 (자동 감지)
 - 5분봉: 최근 60일 이내 (자동 전환)
 
-### 분봉 단타 백테스팅 (매매 로그 기반)
+### 파라미터 그리드 서치
 
-실제 운영 후 `trading_logs/YYYYMMDD.jsonl`이 쌓이면, 당일 스크리닝 후보 종목을 로그에서 자동으로 불러와 정밀 백테스트가 가능합니다.
+Streamlit 백테스팅 탭에서 K / 손절 / 트레일링 범위를 지정하면 모든 조합을 한 번에 계산합니다. 데이터는 캐시되어 재수집 없이 반복 실행 가능합니다.
 
-**특징**
-- 스크리닝 시각의 분봉 종가에 즉시 매수 가정 (목표가 재돌파 대기 없음)
-- 포지션당 예산 = 초기자금 ÷ 당일 포지션 수 (자동 입력, 수정 가능)
-- 그리드 서치: 손절(%) × 트레일링(%) 조합으로 결과 테이블 표시
-- 결과 테이블에 종목별 수익률 개별 표시 + 색상(양수=청색/음수=적색)
-- 종목 선택 또는 파라미터 변경 시 이전 결과 자동 초기화
-
-> 그리드 서치는 `params` 딕셔너리를 통해 전달되므로, 실시간 트레이딩 중에도 전역 파라미터(`strategy_config`)를 오염시키지 않습니다.
+> 그리드 서치는 `params` 딕셔너리로 격리되어 실시간 트레이딩 중에도 전역 파라미터를 오염시키지 않습니다.
 
 ---
 
-## 텔레그램 연동
+## WatchDog 자동 재시작
 
-### 봇 구성
-
-| 봇 | 역할 | 환경변수 |
-|---|---|---|
-| `kis_trader_bot` | 매수 종목 선택, 전량매도 문의 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
-| `kis_trader_alarmbot` | 매수/매도 체결 알림, 수익률 정기 알림 | `TELEGRAM_ALARM_BOT_TOKEN`, `TELEGRAM_ALARM_CHAT_ID` |
-
-### 설정 방법
-
-1. BotFather에서 봇 2개 생성 후 각각 토큰 환경변수에 등록
-2. `@userinfobot`으로 본인 Chat ID 확인 후 등록
-3. 연동 테스트: `python test_telegram.py`
-
-### 매매 흐름
+### 구조 (3단계)
 
 ```
-09:30~14:00  매 10분 스크리닝
-  → kis_trader_bot: 후보 종목 버튼 전송 (최대 N개 멀티선택, N=빈 슬롯 수)
-  → 종목별 점수 세부내역 표시 (돌파/AD/캔들/양봉/LLM/DART/관심종목)
-  → 관심종목(watchlist)은 ⭐관심 배지로 강조 표시
+[레벨 1] watchdog.py (pythonw.exe — 창 없이 백그라운드 실행)
+  또는   watchdog_hidden.vbs (wscript.exe — CMD 창 숨김)
+  - Electron 앱이 종료되면 재시작
+  - 장중(08:00~15:00): 10초 후 재시작
+  - 장외 시간: 60초 대기 후 재시작
+  - 로그: .cache/watchdog.log
 
-13:30 / 14:00 / 14:30  전량 매도 문의
-  → kis_trader_bot: 보유 종목별 수익률 + ⬜/✅ 토글 버튼
-  → 선택 종목만 청산, 미응답 시 자동 유지
+[레벨 2] app.py 워치독 스레드
+  - 트레이딩 스레드(scheduler)만 죽으면 재시작
+  - Streamlit은 살아있지만 트레이딩이 멈춘 경우 처리
 
-15:00  강제 전량 청산
-
-매수 체결    → kis_trader_alarmbot 알림 (점수 세부내역 포함)
-매도 체결    → kis_trader_alarmbot 알림 (청산 조건 포함)
-20분 주기    → kis_trader_alarmbot 보유 수익률 알림 (09:30~15:00)
+[레벨 3] trading_state.json (.cache/)
+  - 비정상 종료 감지 플래그
+  - F5 새로고침 / 정상 재부팅과 실제 비정상 종료 구분 (PID + 날짜 + tasklist 확인)
+  - 재시작 시 텔레그램으로 모드 선택 요청
+  - 3분 무응답 시 모의투자로 자동 진입
+  - 2회 이상 복구 모드 진입 시 수동 진입 버튼 표시
 ```
 
-### 멀티 선택 UI
+### 정상 vs 비정상 종료
 
-- 스크리닝 결과 전송 시 빈 슬롯 수만큼 동시 선택 가능
-- 버튼 탭 → ✅ 토글, 재탭 → ⬜ 해제
-- 선택 완료(N개) 버튼 또는 N개 채워지면 자동 확정
-- 각 후보 종목 아래 점수 세부내역 표시:
-  ```
-  🥇 1위  삼성전자 ⭐관심 (005930) 🔨
-      목표가: 82,000원  여유율: +0.31%
-      📊 돌파:38점 AD:15점 캔들:10점 양봉:15점 LLM:5점 DART:10점 ⭐+10점 → 합계:93점
-  ```
+| 상황 | 종료 유형 | 재시작 알림 |
+|------|-----------|-------------|
+| 15:00 강제청산 후 자연 종료 | ✅ 정상 | ❌ |
+| MAX_TRADES 도달 후 종료 | ✅ 정상 | ❌ |
+| Streamlit 정지 버튼 | ✅ 정상 | ❌ |
+| Ctrl+C | ✅ 정상 | ❌ |
+| F5 새로고침 | ✅ 정상 (PID 동일 감지) | ❌ |
+| 정상 재부팅 | ✅ 정상 (날짜 비교 감지) | ❌ |
+| Python 프로세스 강제 Kill | 🚨 비정상 | ✅ |
+| 처리 안 된 Exception | 🚨 비정상 | ✅ |
+| PC 강제 재부팅 / 전원 차단 | 🚨 비정상 | ✅ |
+
+### Windows 작업 스케줄러 등록 (자동화 권장)
+
+**pythonw.exe 방식 (CMD 창 완전 숨김, 권장):**
+
+```
+프로그램: C:\KIS_Trader\1. Practice\kis_trader\venv\Scripts\pythonw.exe
+인수:     "C:\KIS_Trader\1. Practice\kis_trader\watchdog.py"
+시작위치: C:\KIS_Trader\1. Practice\kis_trader
+트리거:   로그온 시, 지연 30초
+```
+
+PowerShell로 자동 등록:
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute "C:\KIS_Trader\1. Practice\kis_trader\venv\Scripts\pythonw.exe" `
+           -Argument """C:\KIS_Trader\1. Practice\kis_trader\watchdog.py""" `
+           -WorkingDirectory "C:\KIS_Trader\1. Practice\kis_trader"
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$trigger.Delay = "PT30S"
+Register-ScheduledTask -TaskName "KIS_AutoTrader_WatchDog" -Action $action -Trigger $trigger -Force
+```
 
 ---
 
-## API 서버 구조
+## 포지션 관리 고급 기능
 
-KIS API는 **가격조회 서버**와 **주문/잔고 서버**가 분리되어 있습니다.
+### 매수 대기 슬롯 자동 교체
 
-| 용도 | 서버 | 앱키 |
+스크리닝 결과 새 후보의 점수가 현재 대기 중인 슬롯보다 **10점 이상** 높으면 자동 교체합니다.
+
+- 대기 중(`bought=False`) 슬롯만 교체 대상
+- 이미 매수된 포지션은 교체되지 않음
+- 교체 시 텔레그램 알림 전송
+
+### 매수 대기 1시간 타임아웃
+
+목표가에 도달하지 못해 1시간 이상 대기 중인 슬롯은 자동 반환됩니다.
+
+### HTS 수동 매수 자동 인식
+
+스크리닝 주기마다 KIS 잔고를 조회하여, 트레이더가 모르는 보유 종목(HTS에서 직접 매수한 종목)을 감지하면 자동으로 모니터링 슬롯에 추가합니다. 손절/트레일링 스탑이 자동 적용됩니다.
+
+### 최대주문가능수량 자동 보정
+
+매수 진입 시 KIS API(`TTTC8908R`)로 실제 최대주문가능수량을 조회하여, 예산 기반 수량과 비교 후 작은 값으로 자동 보정합니다.  
+`주문가능금액 초과` 오류 발생 시에도 재조회하여 수량을 줄여 재시도합니다.
+
+---
+
+## PC 이전 체크리스트
+
+| 항목 | 방법 | 필수 |
 |------|------|------|
-| 가격조회 (현재가·일봉·시간봉) | `openapi.koreainvestment.com:9443` (실전) | 실전 앱키 항상 사용 |
-| 주문·잔고 (모의투자) | `openapivts.koreainvestment.com:9443` | 모의투자 앱키 |
-| 주문·잔고 (실전투자) | `openapi.koreainvestment.com:9443` | 실전투자 앱키 |
+| Python 3.11+ 설치 | python.org | ✅ |
+| Node.js 설치 | nodejs.org | ✅ (Electron 사용 시) |
+| 가상환경 + 패키지 | `pip install -r requirements.txt` | ✅ |
+| Electron 패키지 | `cd electron && npm install` | ✅ (Electron 사용 시) |
+| 환경변수 12개 | `sysdm.cpl` 등록 | ✅ |
+| 코드 이전 | `git clone` 또는 폴더 복사 | ✅ |
+| KIS API 등록 IP | Open API 포털에서 새 IP 추가 | ✅ |
+| DART 기업코드 | `download_corp_codes()` 1회 실행 | DART 사용 시 |
+| 작업 스케줄러 등록 | PowerShell 명령 또는 taskschd.msc | WatchDog 사용 시 |
+| 텔레그램 봇 | 기존 PC 종료 후 시작 (중복 금지) | 텔레그램 사용 시 |
 
-> 모의투자 모드에서도 가격조회는 실전 서버·실전 앱키를 사용합니다.  
-> 토큰도 별도로 발급·캐시됩니다 (`.cache/token_cache_query.json`).
-
----
-
-## 매매 안전장치
-
-| 기능 | 설명 |
-|---|---|
-| API 재시도 | 가격조회 500 에러 시 최대 6회 재시도 (점진적 대기) |
-| 토큰 만료 자동 갱신 | HTTP 500 본문의 `EGW00123` 감지 → 즉시 재발급 후 재시도 |
-| Rate Limit 재시도 | `EGW00201` 감지 → 대기 후 재시도 (잔고조회 최대 15회) |
-| 09:00 부하 분산 | 장 시작 후 잔고 조회 전 5초 대기 |
-| 연속 오류 청산 | 10회 연속 API 실패 시 자동 청산 후 슬롯 반환 |
-| Thread Jitter | 멀티 포지션 시작 시 0~3초 랜덤 지연으로 동시 API 호출 분산 |
-| 토큰 Thread Lock | 멀티 스레드 토큰 캐시 동시 접근 충돌 방지 |
-| 포지션 복구 | 재시작 시 KIS 잔고 조회로 기존 보유 포지션 자동 복구 |
-| HTS 수동매도 감지 | 5루프(약 100초)마다 잔고 확인, 외부 매도 감지 시 슬롯 자동 반환 |
-| 텔레그램 충돌 방지 | 봇 시작 전 `deleteWebhook` 호출로 이전 폴링 세션 초기화 |
-| 수동매수 폴백 | 목표가 조회 실패 시 시장가 즉시 매수로 폴백 |
-| 일봉 캐시 | `_daily_cache`로 스크리닝 중 동일 종목 중복 API 호출 방지 |
+> **KIS API IP 등록:** 새 네트워크에서 실행하면 공인 IP가 달라져 API 호출이 막힙니다.  
+> `https://www.whatismyip.com`에서 공인 IP 확인 후 KIS Open API 포털에서 추가하세요.
 
 ---
 
 ## 주의사항
 
-**실전투자 전 반드시 확인하세요.**
-
-- 모의투자와 실전투자는 주문 API Key와 Base URL이 다릅니다. 사이드바에서 모드를 바꾸면 즉시 전환됩니다.
-- **가격조회는 항상 실전 앱키**를 사용합니다. `KIS_REAL_APP_KEY / KIS_REAL_APP_SECRET` 미설정 시 스크리닝이 동작하지 않습니다.
-- Desktop이 절전 또는 화면 잠금 상태여도 서버(Streamlit)는 계속 실행됩니다. 단, 네트워크 단절 시 API 오류로 강제 청산 로직이 작동합니다.
-- API Rate Limit: KIS 모의투자 서버는 실전 서버보다 Rate Limit이 낮습니다. `CHECK_INTERVAL`을 20초 이상 권장합니다.
+- 모의투자와 실전투자는 API Key와 계좌번호가 다릅니다. 사이드바 모드 전환 시 즉시 키가 교체됩니다.
+- Streamlit 브라우저 탭을 닫아도 서버(cmd)는 계속 실행됩니다. Electron 앱의 X 버튼으로 종료하세요.
+- 같은 봇 토큰으로 2개 프로세스가 실행되면 Telegram Conflict 오류 발생 → 반드시 1개 프로세스만 실행.
+- API Rate Limit: `CHECK_INTERVAL`(기본 20초)을 너무 짧게 설정하지 마세요.
 - 백테스팅 결과는 과거 데이터 기반 시뮬레이션이며 미래 수익을 보장하지 않습니다.
-- `SCREENING_END_TIME`(기본 14:00) 이후로는 신규 포지션 진입이 중단됩니다.
+- Desktop 절전 모드 비활성화 필수 — 절전 시 API 호출 중단됩니다.
+- API 키는 반드시 Windows 환경변수로만 관리하고 `.env` 파일에 저장하지 마세요.
 
 ### .gitignore 필수 항목
 
 ```
+venv/
 .cache/
-trading_logs/
 scoring/cache/
+trading_logs/
+backtest/logs/
+__pycache__/
+*.pyc
 token_cache.json
-*.env
+.env
 ```
-
----
-
-## 테스트
-
-```bash
-# API 연결 및 매수/매도 테스트 (모의투자)
-python test_trade.py
-
-# 텔레그램 연동 테스트
-python test_telegram.py
-
-# AI 점수 시스템 테스트
-python test_scoring.py
-```
-
----
-
-## 라이선스
-
-개인 사용 목적으로 제작된 프로젝트입니다.
-한국투자증권 Open API 이용약관을 준수하여 사용하세요.
