@@ -156,16 +156,29 @@ def calc_position_budget():
     return per_pos
 
 
-def calc_quantity(current_price, budget=None):
+def calc_quantity(current_price, budget=None, stock_code=None):
     """
-    매수 수량 계산
-    budget : 포지션당 예산(원). None이면 단일 포지션 방식으로 API 조회.
+    매수 수량 계산.
+    budget     : 포지션당 예산(원). None이면 단일 포지션 방식으로 API 조회.
+    stock_code : 지정 시 KIS API로 최대주문가능수량 조회 후 예산 기반 수량과 min() 적용.
     """
     if budget is None:
         budget = calc_position_budget()
 
     quantity = budget // current_price
     print(f"  투자 예산  : {budget:,}원")
+    print(f"  예산 기반  : {quantity}주 (@ {current_price:,}원)")
+
+    if stock_code:
+        try:
+            from api import get_max_order_qty
+            max_qty = get_max_order_qty(stock_code, current_price)
+            if max_qty > 0 and max_qty < quantity:
+                print(f"  최대주문가능: {max_qty}주 → 수량 조정")
+                quantity = max_qty
+        except Exception as e:
+            print(f"  최대주문수량 조회 실패 ({e}) — 예산 기반 수량 사용")
+
     print(f"  매수 수량  : {quantity}주 (@ {current_price:,}원)")
     return quantity
 

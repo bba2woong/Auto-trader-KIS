@@ -103,3 +103,40 @@ def get_balance(max_retries=15):
         time.sleep(wait)
 
     raise Exception(f"잔고조회 실패: {max_retries}회 재시도 초과")
+
+
+def get_max_order_qty(stock_code: str, price: int) -> int:
+    """
+    특정 종목 현재가 기준 최대 주문 가능 수량 조회.
+    KIS TR: VTTC8908R (모의) / TTTC8908R (실전)
+    반환: 최대 매수 가능 수량 (int), 조회 실패 시 0
+    """
+    url   = f"{config.TRD_URL}/uapi/domestic-stock/v1/trading/inquire-psbl-order"
+    tr_id = "VTTC8908R" if config.MODE == "mock" else "TTTC8908R"
+
+    account_no   = config.ACCOUNT.replace("-", "")[:8]
+    product_code = config.ACCOUNT.replace("-", "")[8:] or "01"
+
+    params = {
+        "CANO":         account_no,
+        "ACNT_PRDT_CD": product_code,
+        "PDNO":         stock_code,
+        "ORD_UNPR":     str(price),
+        "ORD_DVSN":     "01",   # 시장가
+        "CMA_EVLU_AMT_ICLD_YN": "N",
+        "OVRS_ICLD_YN": "N",
+    }
+
+    try:
+        headers = get_headers(tr_id)
+        headers["custtype"] = "P"
+        res  = requests.get(url, headers=headers, params=params, verify=False)
+        data = res.json()
+        if data.get("rt_cd") == "0":
+            qty = int(data["output"].get("max_buy_qty", 0))
+            return qty
+        print(f"  [최대주문수량] API 오류: {data.get('msg1','')}")
+        return 0
+    except Exception as e:
+        print(f"  [최대주문수량] 조회 실패: {e}")
+        return 0

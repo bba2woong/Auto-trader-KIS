@@ -226,7 +226,7 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
                     can_enter = gap <= sc.MAX_BREAKOUT_GAP
 
                     if can_enter:
-                        quantity = calc_quantity(current_price, budget=budget)
+                        quantity = calc_quantity(current_price, budget=budget, stock_code=stock_code)
                         if quantity < 1:
                             print(f"  {tag} ⚠️ 수량 부족 — 포기")
                             if on_close:
@@ -306,13 +306,9 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
             BUDGET_ERRORS = ("주문가능금액을 초과", "매수가능금액 초과", "잔고부족", "증거금 부족")
             if not bought and any(kw in err_msg for kw in BUDGET_ERRORS):
                 try:
-                    from api import get_balance as _gb
-                    _bal = _gb()
-                    _avail = int(float(_bal["계좌요약"][0].get("ord_psbl_cash", 0)))
-                    if _avail <= 0:
-                        _avail = int(float(_bal["계좌요약"][0].get("dnca_tot_amt", 0)))
-                    _new_qty = _avail // current_price if current_price > 0 else 0
-                    print(f"\n[{get_now()}] {tag} 💰 주문가능금액 {_avail:,}원 → 수량 재조정 {quantity}주 → {_new_qty}주")
+                    from api import get_max_order_qty as _gmq
+                    _new_qty = _gmq(stock_code, current_price)
+                    print(f"\n[{get_now()}] {tag} 💰 최대주문가능수량 재조회 → {_new_qty}주 (기존 {quantity}주)")
                     if _new_qty >= 1:
                         buy_stock(stock_code, _new_qty)
                         quantity   = _new_qty
@@ -335,13 +331,12 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
                                 pass
                         error_count = 0
                     else:
-                        print(f"\n[{get_now()}] {tag} 🚫 주문가능금액 부족 ({_avail:,}원) — 슬롯 반환")
+                        print(f"\n[{get_now()}] {tag} 🚫 최대주문가능수량 0 — 잔액 부족, 슬롯 반환")
                         try:
                             from telegram_alarm import notify_alarm
                             notify_alarm(
                                 f"🚫 [{stock_name}] 주문가능금액 부족\n"
-                                f"가용금액: {_avail:,}원 / 필요: {current_price:,}원 × 1주\n"
-                                f"슬롯 반환"
+                                f"1주({current_price:,}원) 매수 불가 — 슬롯 반환"
                             )
                         except Exception:
                             pass
