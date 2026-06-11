@@ -843,7 +843,7 @@ async def _send_text(message):
 _manual_buy_counter = 0   # 수동 슬롯 번호용
 
 
-def start_manual_buy_monitor(pm, budget_per_slot, stop_event=None):
+def start_manual_buy_monitor(pm, budget_per_slot, stop_event=None, on_sell_command=None):
     """
     백그라운드 스레드로 텔레그램 메시지 폴링.
     6자리 숫자 코드 수신 시 해당 종목 즉시 매수.
@@ -892,6 +892,14 @@ def start_manual_buy_monitor(pm, budget_per_slot, stop_event=None):
 
                     # 본인 채팅방 메시지만 처리
                     if chat_id != str(CHAT_ID):
+                        continue
+
+                    # "sell" 명령 → 매도 선택 창
+                    if text.lower() == "sell":
+                        if on_sell_command:
+                            threading.Thread(
+                                target=on_sell_command, daemon=True
+                            ).start()
                         continue
 
                     # 6자리 숫자 = 종목코드

@@ -723,11 +723,26 @@ def run_scheduler():
         # 보유 종목 수익률 정기 알림 스레드 시작
         _start_alert_thread(pm)
 
-        # 텔레그램 수동 매수 모니터 시작 (6자리 코드 메시지 → 즉시 매수)
+        # 텔레그램 수동 매수 모니터 시작 (6자리 코드 → 즉시 매수, "sell" → 매도 선택)
         if _telegram_enabled():
             from telegram_bot import start_manual_buy_monitor
-            start_manual_buy_monitor(pm, budget_per_slot, stop_event=_get_stop_event())
-            print(f"[{get_now()}] 📱 수동매수 모니터 시작 — 종목코드 6자리 메시지로 즉시 매수 가능")
+
+            def _on_sell_command():
+                if pm.positions_info:
+                    _handle_mass_sell_query(pm, "수동")
+                else:
+                    try:
+                        from telegram_alarm import notify_alarm
+                        notify_alarm("📭 현재 보유 포지션이 없습니다.")
+                    except Exception:
+                        pass
+
+            start_manual_buy_monitor(
+                pm, budget_per_slot,
+                stop_event=_get_stop_event(),
+                on_sell_command=_on_sell_command,
+            )
+            print(f"[{get_now()}] 📱 수동매수 모니터 시작 — 종목코드 6자리: 즉시 매수 / 'sell': 매도 선택")
 
         while True:
             now_hhmm = datetime.now().strftime("%H:%M")
