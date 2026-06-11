@@ -298,8 +298,26 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
                         return
 
         except Exception as e:
+            err_msg = str(e)
             error_count += 1
             print(f"\n[{get_now()}] {tag} ⚠️ API 오류 ({error_count}/{MAX_ERRORS}): {e}")
+
+            # 재시도해도 해결 안 되는 오류 → 즉시 슬롯 반환
+            FATAL_BUY_ERRORS = ("주문가능금액을 초과", "잔고부족", "증거금 부족", "매수가능금액 초과")
+            if not bought and any(kw in err_msg for kw in FATAL_BUY_ERRORS):
+                print(f"\n[{get_now()}] {tag} 🚫 매수 불가 오류 — 슬롯 반환 (예산 재조정 필요)")
+                try:
+                    from telegram_alarm import notify_alarm
+                    notify_alarm(
+                        f"🚫 [{stock_name}] 매수 불가\n"
+                        f"사유: {err_msg}\n"
+                        f"슬롯 반환 — 예산 확인 필요"
+                    )
+                except Exception:
+                    pass
+                if on_close:
+                    on_close("매수불가", stock_code)
+                return
 
             # 연속 에러 한도 초과 → 보유 중이면 강제 청산 후 종료
             if error_count >= MAX_ERRORS:
