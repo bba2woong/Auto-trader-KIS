@@ -51,7 +51,8 @@ def _telegram_enabled():
 # ──────────────────────────────────────────
 
 def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
-                     restore_buy_price=0, restore_quantity=0, stop_event=None):
+                     restore_buy_price=0, restore_quantity=0, stop_event=None,
+                     on_buy=None):
     """
     단일 종목 매매 루프. 스레드로 실행.
     budget             : 포지션당 배정 예산 (원)
@@ -59,6 +60,7 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
     restore_buy_price  : 재시작 복구 시 기존 매수가 (0이면 신규 진입 대기)
     restore_quantity   : 재시작 복구 시 기존 보유 수량
     stop_event         : 외부에서 강제 청산 요청 시 set()
+    on_buy             : 매수 체결 시 호출할 콜백 (stock_code) — 슬롯 메타 갱신용
     """
     tag = f"[슬롯{slot_no}] {stock_name}({stock_code})"
     print(f"\n{'='*44}")
@@ -95,6 +97,7 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
     breakout_seen = False
     error_count   = 0    # 연속 에러 횟수
     MAX_ERRORS    = 10   # 이 횟수 초과 시 강제 청산
+    wait_start    = time.time()   # 매수 대기 시작 시각 (1시간 타임아웃용)
 
     print(f"\n[{get_now()}] {tag} 매수 대기 중...")
 
@@ -203,6 +206,21 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
                     pass  # 잔고 조회 실패 시 무시, error_count 증가 없음
 
             if not bought:
+                # 1시간 타임아웃 — 장기 미체결 슬롯 반환
+                if time.time() - wait_start > 3600:
+                    print(f"\n[{get_now()}] {tag} ⏰ 매수 대기 1시간 초과 — 슬롯 반환")
+                    try:
+                        from telegram_alarm import notify_alarm
+                        notify_alarm(
+                            f"⏰ [{stock_name}] 매수 대기 1시간 초과\n"
+                            f"슬롯 반환 — 새 종목 탐색 재개"
+                        )
+                    except Exception:
+                        pass
+                    if on_close:
+                        on_close("타임아웃", stock_code)
+                    return
+
                 if current_price >= target_price:
                     gap       = (current_price - target_price) / target_price * 100
                     can_enter = gap <= sc.MAX_BREAKOUT_GAP
@@ -229,6 +247,12 @@ def run_single_stock(stock_code, stock_name, slot_no, budget, on_close=None,
                         # PositionManager에 포지션 정보 등록 (수익률 알림용)
                         if on_close and hasattr(on_close, '__self__'):
                             on_close.__self__.register_buy(stock_code, stock_name, buy_price, quantity)
+                        # 슬롯 메타 bought 상태 갱신 (교체 로직용)
+                        if on_buy:
+                            try:
+                                on_buy(stock_code)
+                            except Exception:
+                                pass
                     else:
                         if not breakout_seen:
                             print(f"\n[{get_now()}] {tag} ⚠️ 고점 보류 (여유율 {gap:.2f}%)")
@@ -309,6 +333,7 @@ class PositionManager:
         self.lock          = threading.Lock()
         self.active        = {}    # {code: thread}
         self.stop_events   = {}    # {code: threading.Event}  외부 강제 청산용
+        self.slot_meta     = {}    # {code: {"score","bought","slot_no","name"}} 교체 로직용
         self.positions_info = {}   # {code: {"name","buy_price","quantity"}}
         self.cooldown_map  = {}    # {code: timestamp}
         self.daily_log     = []
@@ -328,6 +353,14 @@ class PositionManager:
             self.positions_info[code] = {
                 "name": name, "buy_price": buy_price, "quantity": quantity
             }
+            if code in self.slot_meta:
+                self.slot_meta[code]["bought"] = True
+
+    def mark_bought(self, code):
+        """on_buy 콜백에서 호출 — bought 상태 True로 갱신"""
+        with self.lock:
+            if code in self.slot_meta:
+                self.slot_meta[code]["bought"] = True
 
     def stop_all(self):
         """모든 포지션에 강제 청산 요청"""
@@ -346,8 +379,15 @@ class PositionManager:
         restore_qty       = stock.get("qty_hint", 0)
 
         stop_event = threading.Event()
+        already_bought = restore_price > 0   # 복구 모드는 이미 매수 완료
         with self.lock:
             self.stop_events[code] = stop_event
+            self.slot_meta[code] = {
+                "score":   stock.get("score", 0),
+                "bought":  already_bought,
+                "slot_no": slot_no,
+                "name":    stock.get("name", code),
+            }
 
         def _run_with_jitter():
             if jitter:
@@ -357,6 +397,7 @@ class PositionManager:
                 restore_buy_price=restore_price,
                 restore_quantity=restore_qty,
                 stop_event=stop_event,
+                on_buy=self.mark_bought,
             )
 
         t = threading.Thread(target=_run_with_jitter, daemon=True)
@@ -372,6 +413,7 @@ class PositionManager:
         with self.lock:
             self.active.pop(code, None)
             self.stop_events.pop(code, None)
+            self.slot_meta.pop(code, None)
             pinfo = self.positions_info.pop(code, {})
             self.cooldown_map[code] = time.time()
             self.daily_log.append({"코드": code, "이름": pinfo.get("name", code), "결과": result})
@@ -580,9 +622,11 @@ def run_scheduler():
 
     # 상태 파일 저장 (watchdog 재시작 후 복구 감지용)
     try:
-        import config as _cfg_state
-        from trading_state import save_state
+        import atexit, config as _cfg_state
+        from trading_state import save_state, clear_state as _cs
         save_state(mode=_cfg_state.MODE, running=True)
+        # 재부팅/강제 종료 시에도 clear_state 보장
+        atexit.register(_cs)
     except Exception:
         pass
 
@@ -610,7 +654,7 @@ def run_scheduler():
 
         # 09:00 직후 KIS 서버 Rate Limit 완화 대기 (수만 건 동시 접속 분산)
         print(f"[{get_now()}] 잔고 조회 전 5초 대기 (서버 부하 분산)...")
-        time.sleep(180)
+        time.sleep(10)
 
         # 포지션당 예산 (장 시작 시 1회 계산)
         print(f"\n[{get_now()}] 포지션 예산 계산 중...")
@@ -679,6 +723,38 @@ def run_scheduler():
                 time.sleep(10)
                 continue
 
+            # ── HTS 수동 매수 감지 (스크리닝 직전 잔고 확인) ──
+            try:
+                from api import get_balance as _get_bal
+                _bal = _get_bal()
+                _active_codes = set(pm.active.keys())
+                for _item in _bal.get("보유종목", []):
+                    _code = _item.get("pdno", "")
+                    _qty  = int(_item.get("hldg_qty", 0))
+                    _avg  = int(float(_item.get("pchs_avg_pric", 0)))
+                    _name = _item.get("prdt_name", _code)
+                    if _code and _code not in _active_codes and _qty > 0 and _avg > 0:
+                        print(f"[{get_now()}] 📌 HTS 수동 매수 감지: {_name} — 모니터링 추가")
+                        slot_counter += 1
+                        pm.open(
+                            {"code": _code, "name": _name,
+                             "buy_price_hint": _avg, "qty_hint": _qty,
+                             "score": 0, "route": "수동"},
+                            slot_counter,
+                        )
+                        try:
+                            from telegram_alarm import notify_alarm
+                            notify_alarm(
+                                f"📌 수동 매수 종목 모니터링 시작\n"
+                                f"종목: {_name} ({_code})\n"
+                                f"평균단가: {_avg:,}원 × {_qty}주\n"
+                                f"자동 손절/트레일링 스탑 적용됩니다."
+                            )
+                        except Exception:
+                            pass
+            except Exception as _e:
+                print(f"[{get_now()}] 잔고 조회 실패 (수동매수 감지): {_e}")
+
             # ── 스크리닝 ──
             print(f"\n[{get_now()}] 스크리닝 시작... (빈 슬롯: {pm.free_slots}개)")
             screened = run_screening(stop_event=stop_ev)   # 정지 신호 전달 → 즉시 중단 가능
@@ -723,6 +799,42 @@ def run_scheduler():
                 notify_screening_result(screen_round, auto_list + confirm_list)
             except Exception:
                 pass
+
+            # ── 매수 대기 중 슬롯 교체 (더 높은 점수 후보 등장 시) ──
+            all_new = auto_list + confirm_list
+            if all_new:
+                with pm.lock:
+                    waiting = [
+                        (code, meta) for code, meta in pm.slot_meta.items()
+                        if not meta.get("bought", True)
+                    ]
+                replaced_codes = set()
+                for new_s in all_new:
+                    for w_code, w_meta in waiting:
+                        if w_code in replaced_codes:
+                            continue
+                        score_gap = new_s.get("score", 0) - w_meta.get("score", 0)
+                        if score_gap >= 10:
+                            print(f"\n[{get_now()}] 🔄 슬롯 교체: {w_meta['name']} "
+                                  f"({w_meta['score']}점) → {new_s['name']} ({new_s.get('score',0)}점)")
+                            try:
+                                from telegram_alarm import notify_alarm
+                                notify_alarm(
+                                    f"🔄 포지션 교체\n"
+                                    f"대기 중: {w_meta['name']} ({w_meta['score']}점)\n"
+                                    f"→ 신규: {new_s['name']} ({new_s.get('score',0)}점)"
+                                )
+                            except Exception:
+                                pass
+                            ev = pm.stop_events.get(w_code)
+                            if ev:
+                                ev.set()
+                            replaced_codes.add(w_code)
+                            # 새 종목이 auto_list면 즉시 오픈, confirm_list면 아래 확인 단계에서 처리
+                            if new_s in auto_list and pm.free_slots <= 0:
+                                # 슬롯이 아직 닫히기 전이므로 아래 자동매수 루프가 잡을 수 있도록 유지
+                                pass  # auto_list에 그대로 남겨 아래 자동매수 루프에서 처리
+                            break
 
             # ── 자동 매수 ──
             for stock in auto_list:

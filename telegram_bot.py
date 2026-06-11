@@ -214,21 +214,81 @@ def send_recovery_query(last_mode: str, timeout: int = 180) -> str:
     """
     비정상 종료 감지 후 재시작 모드를 텔레그램으로 문의.
     반환: "mock" | "real" | None (무응답 또는 skip)
+    send_and_wait 패턴과 동일하게 Application polling을 사용.
     """
     if not BOT_TOKEN or not CHAT_ID:
         return None
+    if _bot_running.is_set():
+        print("[TelegramBot] 이미 실행 중 — recovery query 중복 호출 차단")
+        return None
+
     _state["result"] = None
     _state["event"].clear()
-    try:
-        asyncio.run(_send_recovery_message(last_mode, timeout))
-    except Exception:
-        return None
-    responded = _state["event"].wait(timeout=timeout)
+
+    _bot_running.set()
+    t = threading.Thread(target=_run_recovery_bot, args=(last_mode, timeout), daemon=True)
+    t.start()
+
+    elapsed = 0
+    while elapsed < timeout:
+        chunk = min(30, timeout - elapsed)
+        if _state["event"].wait(timeout=chunk):
+            break
+        elapsed += chunk
+        if not t.is_alive():
+            print("[TelegramBot] recovery 봇 스레드 비정상 종료")
+            _bot_running.clear()
+            return None
+
     _state["event"].set()
-    return _state["result"] if responded else None
+    t.join(timeout=5)
+    _bot_running.clear()
+    return _state["result"]
 
 
-async def _send_recovery_message(last_mode: str, timeout: int):
+def _run_recovery_bot(last_mode: str, timeout: int):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    MAX_RETRY = 2
+    for attempt in range(MAX_RETRY):
+        try:
+            loop.run_until_complete(_recovery_main(last_mode, timeout))
+            break
+        except Exception as e:
+            if "Conflict" in str(e) and attempt < MAX_RETRY - 1:
+                time.sleep(10)
+                loop.close()
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            else:
+                _state["event"].set()
+                break
+    loop.close()
+
+
+async def _recovery_main(last_mode: str, timeout: int):
+    from telegram.ext import Application, CallbackQueryHandler
+    _reset_polling()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .connect_timeout(10)
+        .read_timeout(10)
+        .build()
+    )
+    app.add_handler(CallbackQueryHandler(_single_button_handler))
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    await _send_recovery_message(last_mode, timeout, bot=app.bot)
+    while not _state["event"].is_set():
+        await asyncio.sleep(0.3)
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
+
+
+async def _send_recovery_message(last_mode: str, timeout: int, bot=None):
     from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
     last_label = "🟡 모의투자" if last_mode == "mock" else "🔴 실전투자"
     keyboard = InlineKeyboardMarkup([
@@ -240,9 +300,8 @@ async def _send_recovery_message(last_mode: str, timeout: int):
             InlineKeyboardButton("⏸ 재시작 안 함", callback_data="RECOVER:skip"),
         ],
     ])
-    bot = Bot(token=BOT_TOKEN)
-    async with bot:
-        msg = await bot.send_message(
+    async def _do_send(b):
+        msg = await b.send_message(
             chat_id=CHAT_ID,
             text=(
                 f"🚨 KIS Auto Trader 비정상 종료 감지\n\n"
@@ -252,7 +311,16 @@ async def _send_recovery_message(last_mode: str, timeout: int):
             ),
             reply_markup=keyboard,
         )
-    _state["msg_id"] = msg.message_id
+        _state["msg_id"] = msg.message_id
+
+    if bot is None:
+        # 단독 호출 시 Bot context manager 사용
+        _bot = Bot(token=BOT_TOKEN)
+        async with _bot:
+            await _do_send(_bot)
+    else:
+        # Application.bot 전달 시 context manager 없이 직접 사용
+        await _do_send(bot)
 
 
 # ──────────────────────────────────────────
@@ -795,6 +863,13 @@ def start_manual_buy_monitor(pm, budget_per_slot, stop_event=None):
         while True:
             if stop_event and stop_event.is_set():
                 break
+
+            # Application 폴링 세션(스크리닝 확인, 복구 등) 실행 중엔
+            # getUpdates 중단 — 두 폴링이 충돌하면 버튼 클릭이 유실됨
+            if _bot_running.is_set():
+                _time.sleep(1)
+                continue
+
             try:
                 res = requests.get(
                     f"{api_url}/getUpdates",
