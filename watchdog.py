@@ -8,10 +8,10 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-BASE    = Path(r"C:\KIS_Trader\1. Practice\kis_trader")
-PYTHON  = BASE / "venv" / "Scripts" / "pythonw.exe"
+BASE     = Path(__file__).parent.resolve()
+PYTHON   = BASE / "venv" / "Scripts" / "pythonw.exe"
 ELECTRON = BASE / "electron" / "node_modules" / "electron" / "dist" / "electron.exe"
-LOGFILE = BASE / ".cache" / "watchdog.log"
+LOGFILE  = BASE / ".cache" / "watchdog.log"
 
 
 def log(msg):

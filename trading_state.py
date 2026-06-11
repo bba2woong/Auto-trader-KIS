@@ -13,10 +13,12 @@ STATE_FILE = Path(__file__).parent / ".cache" / "trader_state.json"
 
 def save_state(mode: str, running: bool):
     """트레이딩 상태 저장 (스케줄러 시작 시 호출)"""
+    import os
     STATE_FILE.parent.mkdir(exist_ok=True)
     state = {
         "mode":       mode,
         "running":    running,
+        "pid":        os.getpid(),   # F5 새로고침 vs 실제 재시작 구분용
         "updated_at": datetime.now().isoformat(),
     }
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")

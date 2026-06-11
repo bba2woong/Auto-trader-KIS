@@ -5,6 +5,26 @@ Streamlit GUI, AI 점수 기반 종목 선별, 텔레그램 알림, 백테스팅
 
 ---
 
+## 빠른 시작 (새 PC 설치)
+
+```
+1. git clone https://github.com/bba2woong/Auto-trader-KIS.git
+   cd Auto-trader-KIS
+
+2. setup.bat 실행  ← 더블클릭 (Python·Node.js·Electron 자동 설치)
+
+3. Windows 시스템 환경변수에 API 키 등록
+   sysdm.cpl → 고급 → 환경변수 → 시스템 변수
+   (setup.bat 실행 시 필요한 변수 목록이 출력됩니다)
+
+4. PC 재시작 → WatchDog이 자동으로 앱을 시작합니다
+```
+
+> **사전 요구사항:** [Python 3.11+](https://python.org) · [Node.js LTS](https://nodejs.org)  
+> 설치 시 **"Add Python to PATH"** 옵션 반드시 체크.
+
+---
+
 ## 목차
 
 1. [전략 개요](#전략-개요)

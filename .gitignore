@@ -9,6 +9,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# 매매 로그 (개인 데이터)
+trading_logs/
+
 # 백테스트 로그 (결과 데이터, 개인용)
 backtest/logs/
 
@@ -29,4 +32,9 @@ Thumbs.db
 # Electron
 electron/node_modules/
 dist/
+
+# 빌드 시 자동 생성 (write_watchdog.py가 생성)
+watchdog.bat
+
+# 아이콘 (바이너리, 별도 관리)
 assets/icon.ico
