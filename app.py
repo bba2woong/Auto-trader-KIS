@@ -77,7 +77,10 @@ class _LogCapture:
         self._line    = ""
 
     def write(self, msg):
-        self.original.write(msg)
+        try:
+            self.original.write(msg)
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            self.original.write(msg.encode("utf-8", errors="replace").decode("utf-8", errors="replace"))
         text   = self._line + msg
         lines  = text.split("\n")
         self._line = lines[-1]
@@ -111,6 +114,12 @@ if _existing is None or not hasattr(_existing, "add_verbose"):
     sys.modules[_LOG_BUF_KEY] = _LogBuffer()
 _log_buf: _LogBuffer = sys.modules[_LOG_BUF_KEY]
 
+# 스케줄러 중복 시작 방지 — sys.modules에 저장하여 Streamlit rerun 간 공유
+_SCHED_KEY = "_kis_trader_sched_lock"
+if _SCHED_KEY not in sys.modules:
+    sys.modules[_SCHED_KEY] = threading.Lock()
+_sched_lock: threading.Lock = sys.modules[_SCHED_KEY]
+
 
 # ──────────────────────────────────────────
 # 트레이딩 시작/정지 헬퍼
@@ -118,7 +127,22 @@ _log_buf: _LogBuffer = sys.modules[_LOG_BUF_KEY]
 
 def _start_scheduler(mode: str):
     """config 재로드 → sys.stdout 교체 → scheduler 백그라운드 실행"""
+    # 프로세스 레벨 lock — Streamlit rerun 중복 호출 방지
+    if not _sched_lock.acquire(blocking=False):
+        return  # 이미 다른 rerun이 시작 중
+    # 스레드가 살아있으면 즉시 해제 후 종료
+    existing_thread = st.session_state.get("trader_thread")
+    if existing_thread and existing_thread.is_alive():
+        _sched_lock.release()
+        return
+
     import config as cfg
+    # Windows cp949 환경에서 이모지 출력 시 인코딩 오류 방지
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     cfg.reload(mode)
     os.environ["TRADING_MODE"] = mode
 
@@ -165,6 +189,10 @@ def _start_scheduler(mode: str):
         finally:
             sys.stdout = capture.original
             st.session_state["trader_running"] = False
+            try:
+                _sched_lock.release()  # 스케줄러 종료 시 lock 해제
+            except RuntimeError:
+                pass  # 이미 해제된 경우 무시
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -267,7 +295,7 @@ def _watchdog_loop(mode: str):
 # ──────────────────────────────────────────
 st.set_page_config(
     page_title="KIS Auto Trader",
-    page_icon="📈",
+    page_icon="🚀",
     layout="wide",
 )
 
@@ -284,11 +312,33 @@ if "bot_guard" not in st.session_state:
 if "recovery_checked" not in st.session_state:
     st.session_state["recovery_checked"] = True
     try:
+        import os as _os
         from trading_state import load_state, is_market_hours
         _rs = load_state()
-        if _rs.get("running") and is_market_hours():
-            st.session_state["recovery_mode"]      = True
-            st.session_state["recovery_mode_last"] = _rs.get("mode", "mock")
+        if _rs.get("running"):
+            # PID 비교: 같은 PID면 F5 새로고침 → 복구 불필요
+            _saved_pid   = _rs.get("pid")
+            _same_process = (_saved_pid is not None and _saved_pid == _os.getpid())
+
+            # 날짜 비교: 전날(재부팅 전 세션) 상태면 crash 아님
+            from datetime import date as _date
+            _updated_at = _rs.get("updated_at", "")
+            _state_today = _updated_at[:10] == str(_date.today()) if _updated_at else False
+
+            if _same_process:
+                pass  # F5 새로고침 — 정상 실행 중
+            elif not _state_today:
+                # 전날 또는 날짜 없음 → 재부팅으로 인한 정상 종료
+                from trading_state import clear_state
+                clear_state()
+                st.session_state["recovery_mode"] = False
+            elif is_market_hours():
+                st.session_state["recovery_mode"]      = True
+                st.session_state["recovery_mode_last"] = _rs.get("mode", "mock")
+            else:
+                from trading_state import clear_state
+                clear_state()
+                st.session_state["recovery_mode"] = False
     except Exception:
         pass
 
@@ -300,17 +350,6 @@ st.title("📈 KIS Auto Trader")
 with st.sidebar:
     st.header("⚙️ 설정")
 
-    trading_mode = st.radio(
-        "투자 모드",
-        ["mock", "real"],
-        format_func=lambda x: "🟡 모의투자" if x == "mock" else "🔴 실전투자",
-    )
-    os.environ["TRADING_MODE"] = trading_mode
-    import config as _cfg_mod
-    if _cfg_mod.MODE != trading_mode:
-        _cfg_mod.reload(trading_mode)
-
-    st.divider()
     st.subheader("전략 파라미터")
 
     import strategy_config as sc
@@ -364,8 +403,6 @@ with st.sidebar:
     sc.KOSDAQ_POOL_SIZE      = kosdaq_size
 
     st.divider()
-    st.caption(f"모드: **{'모의' if trading_mode == 'mock' else '실전'}** | "
-               f"Base URL: {os.environ.get('BASE_URL', '...')}")
 
 # ──────────────────────────────────────────
 # 탭
@@ -507,6 +544,15 @@ with tab_trade:
     st.subheader("🚀 트레이딩")
 
     # ── 비정상 종료 복구 배너 ──
+    # 장외 시간에 recovery_mode가 남아있는 경우 (탭 전환 등으로 재진입 시)
+    if st.session_state.get("recovery_mode"):
+        from trading_state import is_market_hours as _imh
+        if not _imh():
+            from trading_state import clear_state as _cs
+            _cs()
+            st.session_state["recovery_mode"] = False
+            st.info("ℹ️ 장 외 시간입니다. 장 시작 후 수동으로 트레이딩을 시작하세요.")
+
     if st.session_state.get("recovery_mode"):
         _last_mode = st.session_state.get("recovery_mode_last", "mock")
         _last_label = "모의투자" if _last_mode == "mock" else "실전투자"
@@ -516,31 +562,67 @@ with tab_trade:
             f"텔레그램으로 재시작 모드 선택 요청을 전송했습니다.\n"
             f"3분 내 응답 없으면 **모의투자**로 자동 진입합니다."
         )
+
+        # 수동 진입 버튼 (텔레그램 응답 후 화면이 멈출 경우 대비)
+        _rc1, _rc2, _rc3 = st.columns([3, 1, 1])
+        with _rc2:
+            if st.button("모의투자로 진입", key="recovery_manual_mock"):
+                st.session_state["recovery_mode"] = False
+                st.session_state["recovery_done"] = True
+                st.session_state["trading_mode"] = "mock"
+                _start_scheduler("mock")
+                st.rerun()
+        with _rc3:
+            if st.button("실전투자로 진입", key="recovery_manual_real"):
+                st.session_state["recovery_mode"] = False
+                st.session_state["recovery_done"] = True
+                st.session_state["trading_mode"] = "real"
+                _start_scheduler("real")
+                st.rerun()
+
         # 복구 스레드가 아직 시작 안 됐으면 시작
         if not st.session_state.get("recovery_thread_started"):
             st.session_state["recovery_thread_started"] = True
 
             def _send_recovery_query(last_mode):
+                selected_mode = "mock"
                 try:
                     from telegram_bot import send_recovery_query
                     result = send_recovery_query(last_mode=last_mode, timeout=180)
-                except Exception:
-                    result = None
-
-                selected_mode = result if result in ("mock", "real") else "mock"
-                if result is None:
+                    selected_mode = result if result in ("mock", "real") else "mock"
+                    if result is None:
+                        try:
+                            from telegram_alarm import notify_alarm
+                            notify_alarm("⏰ 복구 응답 없음 — 모의투자로 자동 진입합니다.")
+                        except Exception:
+                            pass
                     try:
-                        from telegram_alarm import notify_alarm
-                        notify_alarm("⏰ 복구 응답 없음 — 모의투자로 자동 진입합니다.")
-                    except Exception:
-                        pass
-
-                import config as _cfg
-                _cfg.reload(selected_mode)
-                os.environ["TRADING_MODE"] = selected_mode
-                st.session_state["trading_mode"]   = selected_mode
-                st.session_state["recovery_mode"]  = False
-                _start_scheduler(selected_mode)   # 워치독 포함 자동 시작
+                        import config as _cfg
+                        _cfg.reload(selected_mode)
+                        os.environ["TRADING_MODE"] = selected_mode
+                    except Exception as _e:
+                        print(f"[Recovery] config.reload 오류: {_e}")
+                except Exception as _e:
+                    import traceback
+                    print(f"[Recovery] send_recovery_query 오류: {_e}")
+                    print(traceback.format_exc())
+                finally:
+                    # 어떤 예외가 발생해도 반드시 recovery 상태 해제
+                    st.session_state["trading_mode"]  = selected_mode
+                    st.session_state["recovery_mode"] = False
+                    st.session_state["recovery_done"] = True
+                    # 혹시 락이 잠겨 있으면 강제 해제 후 재시도
+                    if _sched_lock.locked():
+                        try:
+                            _sched_lock.release()
+                        except RuntimeError:
+                            pass
+                    try:
+                        _start_scheduler(selected_mode)
+                    except Exception as _e:
+                        import traceback
+                        print(f"[Recovery] _start_scheduler 오류: {_e}")
+                        print(traceback.format_exc())
 
             _rt = threading.Thread(
                 target=_send_recovery_query,
@@ -548,6 +630,11 @@ with tab_trade:
                 daemon=True,
             )
             _rt.start()
+
+        # 복구 대기 중 3초마다 자동 rerun → 완료 시 즉시 UI 갱신
+        import time as _t
+        _t.sleep(3)
+        st.rerun()
 
     running  = st.session_state.get("trader_running", False)
     t_mode   = st.session_state.get("trader_mode", "—")
@@ -600,7 +687,9 @@ with tab_trade:
     with b3:
         if st.button("⏹ 정지", use_container_width=True, disabled=not running):
             from scheduler import _get_stop_event
+            from trading_state import clear_state as _clear_state
             _get_stop_event().set()
+            _clear_state()   # 정상 종료 → 다음 재시작 시 복구 모드 미발동
             _log_buf.add_history(
                 "⏹ 정지 요청 — 모니터링 중단됩니다. "
                 "보유 포지션은 KIS 계좌에 그대로 유지됩니다. "
