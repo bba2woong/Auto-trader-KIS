@@ -21,6 +21,25 @@ const { app, BrowserWindow, Menu, Tray, dialog, Notification, nativeImage } = re
 
 // Windows 작업표시줄 아이콘 설정 (앱 시작 전에 호출해야 적용됨)
 app.setAppUserModelId("com.kisautotrader.app");
+
+// 단일 인스턴스 강제 — 이미 실행 중이면 기존 창 포커스 후 종료
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  const { dialog } = require("electron");
+  dialog.showErrorBox(
+    "KIS Auto Trader",
+    "이미 실행 중입니다.\n중복 실행되어 프로그램을 종료합니다."
+  );
+  app.exit(0);
+}
+
+app.on("second-instance", () => {
+  // 두 번째 인스턴스가 실행될 때 기존 창을 앞으로
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
