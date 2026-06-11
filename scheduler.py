@@ -642,10 +642,13 @@ def restore_positions(pm):
         # 기존 포지션 정보를 스레드에 주입 (jitter 없이 즉시 시작)
         slot_no = -(restored + 1)  # 복구 슬롯은 음수로 구분
         pm.open(
-            {"code": code, "name": name, "buy_price_hint": avg_price, "qty_hint": qty},
+            {"code": code, "name": name, "buy_price_hint": avg_price, "qty_hint": qty,
+             "score": 0},
             slot_no,
             jitter=False,
         )
+        # positions_info에 즉시 등록 — 매도 문의 대상에 포함되도록
+        pm.register_buy(code, name, avg_price, qty)
         restored += 1
 
     if restored:

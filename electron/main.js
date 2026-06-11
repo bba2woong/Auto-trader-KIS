@@ -18,6 +18,9 @@
 "use strict";
 
 const { app, BrowserWindow, Menu, Tray, dialog, Notification, nativeImage } = require("electron");
+
+// Windows 작업표시줄 아이콘 설정 (앱 시작 전에 호출해야 적용됨)
+app.setAppUserModelId("com.kisautotrader.app");
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
@@ -296,13 +299,16 @@ function showMainWindow() {
 }
 
 function createMainWindow() {
-  const iconOpt = fs.existsSync(ICON_PATH) ? { icon: ICON_PATH } : {};
+  const iconFile = fs.existsSync(ICON_PATH) ? ICON_PATH
+                 : fs.existsSync(ICON_PNG_PATH) ? ICON_PNG_PATH
+                 : null;
 
   mainWindow = new BrowserWindow({
     width:  1400,
     height: 900,
     title:  "KIS Auto Trader",
     show:   false,
+    icon:   iconFile || undefined,
     titleBarStyle:   "overlay",
     titleBarOverlay: {
       color:       "#0a1628",   // 진한 곤색
@@ -313,7 +319,6 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration:  false,
     },
-    ...iconOpt,
   });
 
   mainWindow.loadURL(STREAMLIT_URL);
