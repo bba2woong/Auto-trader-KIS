@@ -15,6 +15,9 @@ trading_logs/
 # 백테스트 로그 (결과 데이터, 개인용)
 backtest/logs/
 
+# 백테스트 1분봉 캐시 (대용량 데이터, 개인용)
+backtest/cache/
+
 # AI 점수 캐시 (일별 분석 결과, 개인용)
 scoring/cache/
 

@@ -895,6 +895,12 @@ def _show_single_result(result):
     init_cap = result["initial_capital"]
     equity   = result["equity_curve"]
 
+    if "_period" in result:
+        _p   = result["_period"]
+        _sd  = datetime.strptime(_p["sd"], "%Y%m%d").strftime("%Y/%m/%d")
+        _ed  = datetime.strptime(_p["ed"], "%Y%m%d").strftime("%Y/%m/%d")
+        st.caption(f"분석 기간: {_p['n_dates']}일 ({_sd} ~ {_ed})")
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("수익률",    f"{ret:+.2f}%")
     m2.metric("총 거래",   f"{n_trades}회")
@@ -1019,213 +1025,300 @@ def _show_grid_result(grid_rows):
 with tab_backtest:
     st.subheader("백테스팅")
 
-    bt_type = st.radio(
-        "백테스팅 유형",
-        ["intraday", "daily"],
-        format_func=lambda x: "📅 다일 (일봉 기반, 장기)" if x == "daily" else "⏱ 단타 (분봉 기반, 최근 7일)",
-        horizontal=True,
-    )
-
     # ── 기본 설정 ──
-    col1, col2, col3 = st.columns(3)
-    if bt_type == "daily":
-        with col1:
-            start_date = st.date_input("시작일", value=datetime.now() - timedelta(days=180))
-        with col2:
-            end_date   = st.date_input("종료일", value=datetime.now())
-        with col3:
-            initial_capital = st.number_input("초기 자금 (원)", value=10_000_000, step=1_000_000)
-
-        pool_option  = st.selectbox("종목 풀", ["kospi","watchlist","custom"],
-                                    format_func=lambda x: {"kospi": f"코스피200 상위 {sc.KOSPI_POOL_SIZE}개 + 관심종목",
-                                                           "watchlist":"관심종목만","custom":"직접 입력"}[x])
-        custom_codes = st.text_input("종목 코드 (콤마 구분)", placeholder="005930,000660") if pool_option == "custom" else ""
+    initial_capital = st.number_input("초기 자금 (원)", value=10_000_000, step=1_000_000)
+    st.caption(f"종목 풀: 사이드바 설정 사용 (코스피 상위 {sc.KOSPI_POOL_SIZE}개 + 관심종목)")
+    _use_custom = st.checkbox("직접 종목 입력", key="bt_intraday_custom")
+    if _use_custom:
+        custom_codes = st.text_input("종목 코드 (콤마 구분)", placeholder="005930,000660",
+                                     key="bt_custom_codes_intraday")
+        pool_option  = "custom"
     else:
-        # 단타: 날짜 + 초기자금 + 종목 풀
-        with col1:
-            bt_date = st.date_input("날짜 (최근 7일 이내)", value=datetime.now() - timedelta(days=1))
-        with col3:
-            initial_capital = st.number_input("초기 자금 (원)", value=10_000_000, step=1_000_000)
-        st.caption(f"종목 풀: 사이드바 설정 사용 (코스피 상위 {sc.KOSPI_POOL_SIZE}개 + 관심종목)")
-        _use_custom = st.checkbox("직접 종목 입력", key="bt_intraday_custom")
-        if _use_custom:
-            custom_codes = st.text_input("종목 코드 (콤마 구분)", placeholder="005930,000660",
-                                         key="bt_custom_codes_intraday")
-            pool_option  = "custom"
-        else:
-            custom_codes = ""
-            pool_option  = "kospi"
+        custom_codes = ""
+        pool_option  = "kospi"
 
-    # ── 파라미터 범위 설정 (단타 전용) ──
-    if bt_type == "intraday":
-        st.divider()
+        # ── 1분봉 데이터 캐시 관리 ──────────────────────────────
+        from backtest.data_cache import (
+            load_manifest      as _dc_lm,
+            collect_and_cache  as _dc_collect,
+            load_minute_data_from_cache as _dc_load,
+            delete_cached_date as _dc_del,
+        )
+        _dc_batches = sorted(_dc_lm().get("batches", []), key=lambda b: b["date"])
 
-        # ── 당일 매매 로그 참고 (표시 전용, 종목 풀과 무관) ──
-        date_str = bt_date.strftime("%Y%m%d")
-        from trading_logger import load_log
-        log_events    = load_log(date_str)
-        bought_codes  = {e["code"] for e in log_events if e["event"] == "buy_executed"}
-        screen_events = [e for e in log_events if e["event"] == "screening_result"]
+        with st.expander("📦 1분봉 데이터 캐시 관리", expanded=len(_dc_batches) == 0):
+            _dcc1, _dcc2 = st.columns([4, 1])
+            with _dcc1:
+                st.caption("yfinance로 최근 7일치 1분봉을 수집해 로컬에 저장합니다. 이미 수집된 날짜는 자동 스킵됩니다.")
+            with _dcc2:
+                _dc_collect_btn = st.button("🔄 데이터 수집", key="bt_dc_collect", use_container_width=True)
+            if _dc_collect_btn:
+                _dc_prog = st.progress(0)
+                _dc_txt  = st.empty()
+                _dc_sl   = _build_stock_list_ui(pool_option, custom_codes)
+                def _dc_cb(cur, tot, msg):
+                    _dc_prog.progress(cur / max(tot, 1))
+                    _dc_txt.caption(msg)
+                _dc_res = _dc_collect(_dc_sl, progress_cb=_dc_cb)
+                _dc_prog.progress(1.0)
+                _dc_txt.caption(
+                    f"✅ 완료! 신규 {len(_dc_res['new_dates'])}일 / "
+                    f"스킵 {len(_dc_res['skipped_dates'])}일 / "
+                    f"오류 {len(_dc_res['error_codes'])}종목"
+                )
+                st.rerun()
+            if _dc_batches:
+                import pandas as _pd_dc
+                st.dataframe(
+                    _pd_dc.DataFrame([{
+                        "날짜": b["date"], "종목수": b["stocks"],
+                        "수집일시": b["collected_at"][:19],
+                    } for b in reversed(_dc_batches)]),
+                    hide_index=True, use_container_width=True,
+                )
+                _dc_del_sel = st.selectbox(
+                    "삭제할 날짜", ["(선택)"] + [b["date"] for b in reversed(_dc_batches)],
+                    key="bt_dc_del_sel",
+                )
+                if _dc_del_sel != "(선택)" and st.button("🗑 선택 날짜 삭제", key="bt_dc_del_btn"):
+                    _dc_del(_dc_del_sel)
+                    st.rerun()
+            else:
+                st.info("수집된 캐시 없음 — 위 버튼으로 먼저 수집하세요.")
 
-        if bought_codes or screen_events:
-            with st.expander(f"📋 {date_str} 매매 로그 참고 — 실제 매수 종목", expanded=False):
-                cand_map = {}
-                for evt in screen_events:
-                    for c in evt.get("candidates", []):
-                        if c["code"] not in cand_map:
-                            cand_map[c["code"]] = c
-                if bought_codes:
-                    ref_cols = st.columns(3)
-                    for i, code in enumerate(sorted(bought_codes)):
-                        info     = cand_map.get(code, {})
-                        ai_score = info.get("score", "—")
-                        grade    = info.get("grade", "")
-                        name     = info.get("name", code)
-                        ref_cols[i % 3].success(f"**{name}** ({code})  AI:{ai_score}점 {grade}")
+        # ── 백테스트 날짜 선택 ──────────────────────────────────
+        bt_use_cache      = False
+        bt_selected_dates = []
+        if _dc_batches:
+            _dc_avail = sorted(b["date"] for b in _dc_batches)
+
+            st.markdown("**📅 백테스트 날짜 선택**")
+            _date_mode = st.radio(
+                "선택 모드",
+                ["range", "individual"],
+                format_func=lambda x: "📅 범위 선택" if x == "range" else "☑️ 개별 선택",
+                horizontal=True,
+                key="bt_date_mode",
+            )
+
+            if _date_mode == "range":
+                # 빠른 선택 버튼
+                _qc = st.columns(4)
+                if _qc[0].button("최근 5일",  key="bt_q5",   use_container_width=True):
+                    st.session_state["bt_range_start"] = datetime.strptime(_dc_avail[max(0, len(_dc_avail)-5)],  "%Y%m%d").date()
+                    st.session_state["bt_range_end"]   = datetime.strptime(_dc_avail[-1], "%Y%m%d").date()
+                if _qc[1].button("최근 10일", key="bt_q10",  use_container_width=True):
+                    st.session_state["bt_range_start"] = datetime.strptime(_dc_avail[max(0, len(_dc_avail)-10)], "%Y%m%d").date()
+                    st.session_state["bt_range_end"]   = datetime.strptime(_dc_avail[-1], "%Y%m%d").date()
+                if _qc[2].button("최근 20일", key="bt_q20",  use_container_width=True):
+                    st.session_state["bt_range_start"] = datetime.strptime(_dc_avail[max(0, len(_dc_avail)-20)], "%Y%m%d").date()
+                    st.session_state["bt_range_end"]   = datetime.strptime(_dc_avail[-1], "%Y%m%d").date()
+                if _qc[3].button("전체",      key="bt_qall", use_container_width=True):
+                    st.session_state["bt_range_start"] = datetime.strptime(_dc_avail[0],  "%Y%m%d").date()
+                    st.session_state["bt_range_end"]   = datetime.strptime(_dc_avail[-1], "%Y%m%d").date()
+
+                # 시작/종료일 date_input (빠른 버튼이 session_state를 먼저 갱신)
+                _rcols = st.columns(2)
+                with _rcols[0]:
+                    _rng_start = st.date_input(
+                        "시작일",
+                        value=st.session_state.get("bt_range_start",
+                              datetime.strptime(_dc_avail[0], "%Y%m%d").date()),
+                        key="bt_range_start",
+                    )
+                with _rcols[1]:
+                    _rng_end = st.date_input(
+                        "종료일",
+                        value=st.session_state.get("bt_range_end",
+                              datetime.strptime(_dc_avail[-1], "%Y%m%d").date()),
+                        key="bt_range_end",
+                    )
+
+                _rs = _rng_start.strftime("%Y%m%d")
+                _re = _rng_end.strftime("%Y%m%d")
+                bt_selected_dates = [d for d in _dc_avail if _rs <= d <= _re]
+                if bt_selected_dates:
+                    bt_use_cache = True
+                    _ds_fmt = datetime.strptime(bt_selected_dates[0],  "%Y%m%d").strftime("%Y/%m/%d")
+                    _de_fmt = datetime.strptime(bt_selected_dates[-1], "%Y%m%d").strftime("%Y/%m/%d")
+                    st.caption(f"✅ {len(bt_selected_dates)}일 선택됨 ({_ds_fmt} ~ {_de_fmt})")
                 else:
-                    st.info("스크리닝 후보 있으나 실제 매수 종목 없음")
+                    st.caption("⚠️ 선택된 범위 내 수집된 날짜가 없습니다.")
 
-        budget_per_pos = initial_capital / sc.MAX_POSITIONS
+            else:  # individual
+                _sel_btns = st.columns([1, 1, 4])
+                if _sel_btns[0].button("전체 선택", key="bt_sel_all",   use_container_width=True):
+                    for _d in _dc_avail:
+                        st.session_state[f"bt_cd_{_d}"] = True
+                if _sel_btns[1].button("전체 해제", key="bt_desel_all", use_container_width=True):
+                    for _d in _dc_avail:
+                        st.session_state[f"bt_cd_{_d}"] = False
 
-        # ── 프리셋 관리 ──────────────────────────────────────────
-        st.divider()
-        _presets = _bt_load_presets()
-        with st.expander("💾 파라미터 프리셋", expanded=False):
-            # 저장
-            c_pn, c_ps = st.columns([3, 1])
-            with c_pn:
-                _pname = st.text_input("프리셋 이름", key="bt_preset_name", placeholder="예) 공격적 손절 세팅")
-            with c_ps:
+                _dc_n    = min(5, max(1, len(_dc_avail)))
+                _dc_cols = st.columns(_dc_n)
+                for _dci, _dcd in enumerate(_dc_avail):
+                    if _dc_cols[_dci % _dc_n].checkbox(_dcd, key=f"bt_cd_{_dcd}"):
+                        bt_selected_dates.append(_dcd)
+                if bt_selected_dates:
+                    bt_use_cache = True
+                    _ds_fmt = datetime.strptime(bt_selected_dates[0],  "%Y%m%d").strftime("%Y/%m/%d")
+                    _de_fmt = datetime.strptime(bt_selected_dates[-1], "%Y%m%d").strftime("%Y/%m/%d")
+                    st.caption(f"✅ {len(bt_selected_dates)}개 날짜 선택됨 ({_ds_fmt} ~ {_de_fmt})")
+                else:
+                    st.caption("날짜를 선택하세요.")
+
+    # ── 파라미터 범위 설정 ──
+    st.divider()
+
+    # ── 당일 매매 로그 참고 (표시 전용, 종목 풀과 무관) ──
+    date_str = bt_selected_dates[-1] if bt_selected_dates else datetime.now().strftime("%Y%m%d")
+    from trading_logger import load_log
+    log_events    = load_log(date_str)
+    bought_codes  = {e["code"] for e in log_events if e["event"] == "buy_executed"}
+    screen_events = [e for e in log_events if e["event"] == "screening_result"]
+
+    if bought_codes or screen_events:
+        with st.expander(f"📋 {date_str} 매매 로그 참고 — 실제 매수 종목", expanded=False):
+            cand_map = {}
+            for evt in screen_events:
+                for c in evt.get("candidates", []):
+                    if c["code"] not in cand_map:
+                        cand_map[c["code"]] = c
+            if bought_codes:
+                ref_cols = st.columns(3)
+                for i, code in enumerate(sorted(bought_codes)):
+                    info     = cand_map.get(code, {})
+                    ai_score = info.get("score", "—")
+                    grade    = info.get("grade", "")
+                    name     = info.get("name", code)
+                    ref_cols[i % 3].success(f"**{name}** ({code})  AI:{ai_score}점 {grade}")
+            else:
+                st.info("스크리닝 후보 있으나 실제 매수 종목 없음")
+
+    budget_per_pos = initial_capital / sc.MAX_POSITIONS
+
+    # ── 프리셋 관리 ──────────────────────────────────────────
+    st.divider()
+    _presets = _bt_load_presets()
+    with st.expander("💾 파라미터 프리셋", expanded=False):
+        # 저장
+        c_pn, c_ps = st.columns([3, 1])
+        with c_pn:
+            _pname = st.text_input("프리셋 이름", key="bt_preset_name", placeholder="예) 공격적 손절 세팅")
+        with c_ps:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
+            if st.button("💾 현재 설정 저장", key="bt_preset_save", use_container_width=True):
+                if _pname.strip():
+                    _snap = {k: st.session_state.get(k) for k in _BT_PRESET_KEYS}
+                    _presets[_pname.strip()] = _snap
+                    _bt_save_presets(_presets)
+                    st.success(f"'{_pname.strip()}' 저장 완료!")
+                    st.rerun()
+                else:
+                    st.warning("이름을 입력하세요.")
+        # 불러오기 / 삭제
+        if _presets:
+            c_ps2, c_pl, c_pd = st.columns([3, 1, 1])
+            with c_ps2:
+                _sel = st.selectbox("저장된 프리셋", list(_presets.keys()), key="bt_preset_sel")
+            with c_pl:
                 st.markdown("&nbsp;", unsafe_allow_html=True)
-                if st.button("💾 현재 설정 저장", key="bt_preset_save", use_container_width=True):
-                    if _pname.strip():
-                        _snap = {k: st.session_state.get(k) for k in _BT_PRESET_KEYS}
-                        _presets[_pname.strip()] = _snap
-                        _bt_save_presets(_presets)
-                        st.success(f"'{_pname.strip()}' 저장 완료!")
-                        st.rerun()
-                    else:
-                        st.warning("이름을 입력하세요.")
-            # 불러오기 / 삭제
-            if _presets:
-                c_ps2, c_pl, c_pd = st.columns([3, 1, 1])
-                with c_ps2:
-                    _sel = st.selectbox("저장된 프리셋", list(_presets.keys()), key="bt_preset_sel")
-                with c_pl:
-                    st.markdown("&nbsp;", unsafe_allow_html=True)
-                    if st.button("📂 불러오기", key="bt_preset_load", use_container_width=True):
-                        for _k, _v in _presets[_sel].items():
-                            if _v is not None:
-                                st.session_state[_k] = _v
-                        st.rerun()
-                with c_pd:
-                    st.markdown("&nbsp;", unsafe_allow_html=True)
-                    if st.button("🗑 삭제", key="bt_preset_del", use_container_width=True):
-                        del _presets[_sel]
-                        _bt_save_presets(_presets)
-                        st.rerun()
-            else:
-                st.caption("저장된 프리셋 없음")
-
-        st.divider()
-        st.markdown("##### 📐 파라미터 설정")
-
-        opt_mode = st.radio(
-            "최적화 방식",
-            ["none", "grid", "bayesian"],
-            format_func=lambda x: {"none": "▶ 단일 실행", "grid": "🔲 그리드 서치", "bayesian": "🧠 베이지안 최적화"}[x],
-            horizontal=True,
-            key="bt_opt_mode",
-        )
-        if opt_mode == "grid":
-            st.caption("범위 체크 시 모든 조합을 캐시 데이터로 한번에 계산합니다.")
-        elif opt_mode == "bayesian":
-            st.caption("optuna TPE 샘플러로 샤프 비율 최대화 파라미터를 자동 탐색합니다.")
-
-        def _param_row(label, single_val, single_min, single_max, single_step,
-                       r_min_def, r_max_def, r_step_def, fmt=".2f"):
-            c1, c2, c3, c4, c5 = st.columns([2, 1.5, 1.5, 1.5, 1.5])
-            with c1:
-                use_range = st.checkbox(f"범위: {label}", key=f"rng_{label}") if opt_mode != "none" else False
-            if use_range:
-                with c2: rmin = st.number_input("최소", value=r_min_def, step=r_step_def, key=f"rmin_{label}", format=f"%{fmt}")
-                with c3: rmax = st.number_input("최대", value=r_max_def, step=r_step_def, key=f"rmax_{label}", format=f"%{fmt}")
-                with c4: rstep = st.number_input("단위", value=r_step_def, step=r_step_def/2, key=f"rstep_{label}", format=f"%{fmt}")
-                n = max(1, round((rmax - rmin) / rstep) + 1)
-                with c5: st.caption(f"{n}개 값")
-                return use_range, None, rmin, rmax, rstep
-            else:
-                with c2: sv = st.number_input("단일값", value=single_val, min_value=single_min,
-                                              max_value=single_max, step=single_step,
-                                              key=f"sv_{label}", format=f"%{fmt}")
-                return use_range, sv, None, None, None
-
-        st.markdown("**트레이딩 파라미터**")
-        rng_k, sv_k, rmin_k, rmax_k, rstep_k = _param_row("K값",     sc.K,                      0.1, 1.0, 0.05, 0.3, 0.7, 0.1, ".2f")
-        rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls = _param_row("손절(%)",  sc.LOSS_RATE*100,          0.5, 5.0, 0.1,  1.0, 4.0, 0.5, ".1f")
-        rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr = _param_row("트레일(%)", sc.TRAILING_STOP_RATE*100, 0.5, 5.0, 0.1,  1.0, 4.0, 0.5, ".1f")
-
-        with st.expander("🤖 Scorer 점수 배점 파라미터", expanded=False):
-            rng_sbr, sv_sbr, rmin_sbr, rmax_sbr, rstep_sbr = _param_row("변동성돌파(최대점)", 40.0, 10.0, 60.0, 1.0, 20.0, 60.0, 5.0, ".0f")
-            rng_sad, sv_sad, rmin_sad, rmax_sad, rstep_sad = _param_row("AD Line 점수",      15.0,  5.0, 30.0, 1.0,  5.0, 25.0, 5.0, ".0f")
-            rng_sca, sv_sca, rmin_sca, rmax_sca, rstep_sca = _param_row("캔들패턴(해머)",    10.0,  0.0, 20.0, 1.0,  0.0, 20.0, 5.0, ".0f")
-            rng_ssb, sv_ssb, rmin_ssb, rmax_ssb, rstep_ssb = _param_row("강봉(60분) 점수",  15.0,  0.0, 30.0, 1.0,  5.0, 25.0, 5.0, ".0f")
-            rng_swl, sv_swl, rmin_swl, rmax_swl, rstep_swl = _param_row("관심종목 보너스",  10.0,  0.0, 20.0, 1.0,  0.0, 20.0, 5.0, ".0f")
-            sv_llm      = st.number_input("LLM 고정 점수 (백테스트용, 중립=5)",  min_value=0,   max_value=10,  value=5,                      step=1, key="sv_llm_fixed")
-            sv_dart     = st.number_input("DART 고정 점수 (백테스트용, 중립=0)", min_value=-10, max_value=10,  value=0,                      step=1, key="sv_dart_fixed")
-            sv_minscore = st.number_input("스크리닝 최소 점수 (MIN_SCORE)",      min_value=0,   max_value=100, value=sc.CONFIRM_SCORE_MIN,   step=5, key="sv_min_score")
-
-        if opt_mode == "bayesian":
-            n_trials = st.slider("베이지안 시도 횟수 (n_trials)", 10, 200, 50, key="bt_n_trials")
+                if st.button("📂 불러오기", key="bt_preset_load", use_container_width=True):
+                    for _k, _v in _presets[_sel].items():
+                        if _v is not None:
+                            st.session_state[_k] = _v
+                    st.rerun()
+            with c_pd:
+                st.markdown("&nbsp;", unsafe_allow_html=True)
+                if st.button("🗑 삭제", key="bt_preset_del", use_container_width=True):
+                    del _presets[_sel]
+                    _bt_save_presets(_presets)
+                    st.rerun()
         else:
-            n_trials = 50
+            st.caption("저장된 프리셋 없음")
 
-        is_grid  = (opt_mode == "grid") and (
-            rng_k or rng_ls or rng_tr or
-            rng_sbr or rng_sad or rng_sca or rng_ssb or rng_swl
-        )
-        is_bayes = opt_mode == "bayesian"
+    st.divider()
+    st.markdown("##### 📐 파라미터 설정")
+
+    opt_mode = st.radio(
+        "최적화 방식",
+        ["none", "grid", "bayesian"],
+        format_func=lambda x: {"none": "▶ 단일 실행", "grid": "🔲 그리드 서치", "bayesian": "🧠 베이지안 최적화"}[x],
+        horizontal=True,
+        key="bt_opt_mode",
+    )
+    if opt_mode == "grid":
+        st.caption("범위 체크 시 모든 조합을 캐시 데이터로 한번에 계산합니다.")
+    elif opt_mode == "bayesian":
+        st.caption("optuna TPE 샘플러로 샤프 비율 최대화 파라미터를 자동 탐색합니다.")
+
+    def _param_row(label, single_val, single_min, single_max, single_step,
+                   r_min_def, r_max_def, r_step_def, fmt=".2f"):
+        c1, c2, c3, c4, c5 = st.columns([2, 1.5, 1.5, 1.5, 1.5])
+        with c1:
+            use_range = st.checkbox(f"범위: {label}", key=f"rng_{label}") if opt_mode != "none" else False
+        if use_range:
+            with c2: rmin = st.number_input("최소", value=r_min_def, step=r_step_def, key=f"rmin_{label}", format=f"%{fmt}")
+            with c3: rmax = st.number_input("최대", value=r_max_def, step=r_step_def, key=f"rmax_{label}", format=f"%{fmt}")
+            with c4: rstep = st.number_input("단위", value=r_step_def, step=r_step_def/2, key=f"rstep_{label}", format=f"%{fmt}")
+            n = max(1, round((rmax - rmin) / rstep) + 1)
+            with c5: st.caption(f"{n}개 값")
+            return use_range, None, rmin, rmax, rstep
+        else:
+            with c2: sv = st.number_input("단일값", value=single_val, min_value=single_min,
+                                          max_value=single_max, step=single_step,
+                                          key=f"sv_{label}", format=f"%{fmt}")
+            return use_range, sv, None, None, None
+
+    st.markdown("**트레이딩 파라미터**")
+    rng_k, sv_k, rmin_k, rmax_k, rstep_k = _param_row("K값",     sc.K,                      0.1, 1.0, 0.05, 0.3, 0.7, 0.1, ".2f")
+    rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls = _param_row("손절(%)",  sc.LOSS_RATE*100,          0.5, 5.0, 0.1,  1.0, 4.0, 0.5, ".1f")
+    rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr = _param_row("트레일(%)", sc.TRAILING_STOP_RATE*100, 0.5, 5.0, 0.1,  1.0, 4.0, 0.5, ".1f")
+
+    with st.expander("🤖 Scorer 점수 배점 파라미터", expanded=False):
+        rng_sbr, sv_sbr, rmin_sbr, rmax_sbr, rstep_sbr = _param_row("변동성돌파(최대점)", 40.0, 10.0, 60.0, 1.0, 20.0, 60.0, 5.0, ".0f")
+        rng_sad, sv_sad, rmin_sad, rmax_sad, rstep_sad = _param_row("AD Line 점수",      15.0,  5.0, 30.0, 1.0,  5.0, 25.0, 5.0, ".0f")
+        rng_sca, sv_sca, rmin_sca, rmax_sca, rstep_sca = _param_row("캔들패턴(해머)",    10.0,  0.0, 20.0, 1.0,  0.0, 20.0, 5.0, ".0f")
+        rng_ssb, sv_ssb, rmin_ssb, rmax_ssb, rstep_ssb = _param_row("강봉(60분) 점수",  15.0,  0.0, 30.0, 1.0,  5.0, 25.0, 5.0, ".0f")
+        rng_swl, sv_swl, rmin_swl, rmax_swl, rstep_swl = _param_row("관심종목 보너스",  10.0,  0.0, 20.0, 1.0,  0.0, 20.0, 5.0, ".0f")
+        sv_llm      = st.number_input("LLM 고정 점수 (백테스트용, 중립=5)",  min_value=0,   max_value=10,  value=5,                      step=1, key="sv_llm_fixed")
+        sv_dart     = st.number_input("DART 고정 점수 (백테스트용, 중립=0)", min_value=-10, max_value=10,  value=0,                      step=1, key="sv_dart_fixed")
+        sv_minscore = st.number_input("스크리닝 최소 점수 (MIN_SCORE)",      min_value=0,   max_value=100, value=sc.CONFIRM_SCORE_MIN,   step=5, key="sv_min_score")
+
+    if opt_mode == "bayesian":
+        n_trials = st.slider("베이지안 시도 횟수 (n_trials)", 10, 200, 50, key="bt_n_trials")
     else:
-        is_grid = False; is_bayes = False
-        opt_mode = "none"; n_trials = 50
-        sv_k = sc.K; sv_ls = sc.LOSS_RATE * 100; sv_tr = sc.TRAILING_STOP_RATE * 100
-        rng_k = rng_ls = rng_tr = False
-        rmin_k = rmax_k = rstep_k = rmin_ls = rmax_ls = rstep_ls = rmin_tr = rmax_tr = rstep_tr = None
-        sv_sbr = 40.0; sv_sad = 15.0; sv_sca = 10.0; sv_ssb = 15.0; sv_swl = 10.0
-        sv_llm = 5; sv_dart = 0; sv_minscore = sc.CONFIRM_SCORE_MIN
-        rng_sbr = rng_sad = rng_sca = rng_ssb = rng_swl = False
-        rmin_sbr = rmax_sbr = rstep_sbr = rmin_sad = rmax_sad = rstep_sad = None
-        rmin_sca = rmax_sca = rstep_sca = rmin_ssb = rmax_ssb = rstep_ssb = None
-        rmin_swl = rmax_swl = rstep_swl = None
+        n_trials = 50
 
-    # ── 단타: 파라미터 변경 감지 → 결과 자동 초기화 ──
-    if bt_type == "intraday":
-        _fingerprint = (
-            bt_date.strftime("%Y%m%d"),
-            pool_option,
-            round(sv_k, 2) if not rng_k else (round(rmin_k, 2), round(rmax_k, 2), round(rstep_k, 2)),
-            round(sv_ls, 2) if not rng_ls else (round(rmin_ls, 2), round(rmax_ls, 2), round(rstep_ls, 2)),
-            round(sv_tr, 2) if not rng_tr else (round(rmin_tr, 2), round(rmax_tr, 2), round(rstep_tr, 2)),
-            opt_mode,
-            round(sv_sbr or 0), round(sv_sad or 0), round(sv_sca or 0), round(sv_ssb or 0), round(sv_swl or 0),
-            sv_llm, sv_dart, sv_minscore,
-        )
-        if st.session_state.get("bt_fingerprint") != _fingerprint:
-            st.session_state["bt_fingerprint"] = _fingerprint
-            st.session_state.pop("bt_result", None)
-            st.session_state.pop("bt_grid",   None)
-            st.session_state.pop("bt_bayes",  None)
+    is_grid  = (opt_mode == "grid") and (
+        rng_k or rng_ls or rng_tr or
+        rng_sbr or rng_sad or rng_sca or rng_ssb or rng_swl
+    )
+    is_bayes = opt_mode == "bayesian"
 
-    # ── 캐시 상태 표시 (단타) ──
-    if bt_type == "intraday":
-        st.divider()
-        expected  = f"{bt_date.strftime('%Y%m%d')}_{pool_option}"
-        cache_key = st.session_state.get("bt_cache_key", "")
-        if cache_key.startswith(expected):
-            cached_n = len(st.session_state.get("bt_minute_data", {}))
-            st.success(f"✅ 캐시 사용 가능 — {bt_date.strftime('%Y%m%d')} / {cached_n}개 종목 로드됨")
-        else:
-            st.info("📥 캐시 없음 — 실행 시 데이터를 수집합니다.")
+    # ── 파라미터 변경 감지 → 결과 자동 초기화 ──
+    _fingerprint = (
+        tuple(sorted(bt_selected_dates)) if bt_selected_dates else "",
+        pool_option,
+        round(sv_k, 2) if not rng_k else (round(rmin_k, 2), round(rmax_k, 2), round(rstep_k, 2)),
+        round(sv_ls, 2) if not rng_ls else (round(rmin_ls, 2), round(rmax_ls, 2), round(rstep_ls, 2)),
+        round(sv_tr, 2) if not rng_tr else (round(rmin_tr, 2), round(rmax_tr, 2), round(rstep_tr, 2)),
+        opt_mode,
+        round(sv_sbr or 0), round(sv_sad or 0), round(sv_sca or 0), round(sv_ssb or 0), round(sv_swl or 0),
+        sv_llm, sv_dart, sv_minscore,
+    )
+    if st.session_state.get("bt_fingerprint") != _fingerprint:
+        st.session_state["bt_fingerprint"] = _fingerprint
+        st.session_state.pop("bt_result", None)
+        st.session_state.pop("bt_grid",   None)
+        st.session_state.pop("bt_bayes",  None)
+
+    # ── 캐시 상태 표시 ──
+    st.divider()
+    if bt_use_cache:
+        st.success(f"✅ 캐시 {len(bt_selected_dates)}일 선택됨 — {', '.join(bt_selected_dates)}")
+    else:
+        st.info("📥 위 '백테스트 날짜 선택'에서 날짜를 선택하세요.")
 
     # ── 실행 버튼 ──
     col_run1, col_run2 = st.columns([4, 1])
@@ -1233,7 +1326,7 @@ with tab_backtest:
         run_btn = st.button("▶ 백테스트 실행", type="primary", use_container_width=True)
     with col_run2:
         if st.button("🗑 캐시 초기화", use_container_width=True):
-            for k in ["bt_cache_key","bt_minute_data","bt_daily_data","bt_result","bt_grid"]:
+            for k in ["bt_cache_key","bt_minute_data_range","bt_daily_data","bt_result","bt_grid"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -1241,189 +1334,175 @@ with tab_backtest:
         prog_bar  = st.progress(0)
         prog_text = st.empty()
         try:
-            if bt_type == "intraday":
-                stock_list     = _build_stock_list_ui(pool_option, custom_codes)
-                budget_per_pos = initial_capital / sc.MAX_POSITIONS
-            else:
-                stock_list     = _build_stock_list_ui(pool_option, custom_codes)
-                budget_per_pos = initial_capital * sc.INVEST_RATIO / sc.MAX_POSITIONS
+            if not bt_use_cache:
+                st.error("백테스트 날짜를 선택하세요. 먼저 '1분봉 데이터 캐시 관리'에서 데이터를 수집하고 날짜를 선택하세요.")
+                st.stop()
 
-            if bt_type == "daily":
-                sd = start_date.strftime("%Y%m%d")
-                ed = end_date.strftime("%Y%m%d")
-                from backtest.data_loader import fetch_multi_ohlcv
-                from backtest.engine import run_backtest
-                all_data = fetch_multi_ohlcv(stock_list, sd, ed, progress_cb=_make_cb(prog_bar, prog_text, "일봉 수집"))
-                prog_text.caption("⚙️ 계산 중...")
-                from backtest.screener_sim import get_default_bt_params as _gdp
-                _daily_params = _gdp()
-                result = run_backtest(all_data, stock_list, sd, ed, initial_capital, params=_daily_params)
-                prog_bar.progress(1.0); prog_text.caption("✅ 완료!")
-                st.session_state["bt_result"] = result
-                st.session_state.pop("bt_grid", None)
-                ret, n_tr, wr, mdd = _calc_summary(result)
-                _save_log({"timestamp": datetime.now().isoformat(), "type":"daily",
-                           "start":sd,"end":ed,"params":{"K":sc.K,"loss":sc.LOSS_RATE,"trail":sc.TRAILING_STOP_RATE},
-                           "initial_capital":initial_capital,"return_pct":round(ret,2),
-                           "trades":n_tr,"win_rate":round(wr,1),"mdd":round(mdd,2)})
-            else:
-                d_str        = bt_date.strftime("%Y%m%d")
-                _run_codes   = tuple(sorted(s["code"] for s in stock_list))
-                _run_hash    = str(hash(_run_codes))[:8]
-                cache_key    = f"{d_str}_{pool_option}_{_run_hash}"
+            stock_list     = _build_stock_list_ui(pool_option, custom_codes)
+            budget_per_pos = initial_capital / sc.MAX_POSITIONS
 
-                # 캐시 미스 → 데이터 수집
-                if st.session_state.get("bt_cache_key") != cache_key:
-                    from backtest.data_loader_yf import fetch_multi_minute_bars_yf
-                    from backtest.data_loader import fetch_multi_ohlcv
-                    actual_date, minute_data = fetch_multi_minute_bars_yf(
-                        stock_list, d_str, progress_cb=_make_cb(prog_bar, prog_text, "분봉 수집"))
-                    from datetime import datetime as dt2
-                    fetch_from = (dt2.strptime(actual_date, "%Y%m%d") - timedelta(days=10)).strftime("%Y%m%d")
-                    prog_bar.progress(0)
-                    daily_data = fetch_multi_ohlcv(stock_list, fetch_from, actual_date,
-                                                   progress_cb=_make_cb(prog_bar, prog_text, "일봉 수집"))
-                    st.session_state["bt_cache_key"]    = cache_key
-                    st.session_state["bt_minute_data"]  = minute_data
-                    st.session_state["bt_daily_data"]   = daily_data
-                    st.session_state["bt_actual_date"]  = actual_date
+            # ── 캐시 CSV에서 분봉 로드 ────────────────────────────
+            from backtest.data_cache import load_minute_data_from_cache as _dc_load_r
+            prog_text.caption("📦 캐시 로드 중…")
+            _codes = {s["code"] for s in stock_list}
+            minute_data_by_date = _dc_load_r(bt_selected_dates, codes=_codes)
+            missing = [d for d in bt_selected_dates if d not in minute_data_by_date]
+            if missing:
+                st.warning(f"캐시 없는 날짜 스킵: {', '.join(missing)}")
+            if not minute_data_by_date:
+                st.error("선택된 날짜의 캐시 데이터가 없습니다. 먼저 데이터를 수집하세요.")
+                st.stop()
+            sd_str = min(bt_selected_dates)
+            ed_str = max(bt_selected_dates)
+            # 일봉: AD Line 계산용 버퍼 (시작일 20일 전부터) — yfinance 사용
+            fetch_from = (datetime.strptime(sd_str, "%Y%m%d") - timedelta(days=20)).strftime("%Y%m%d")
+            prog_bar.progress(0.3)
+            from backtest.data_loader_yf import fetch_multi_ohlcv_yf
+            daily_data = fetch_multi_ohlcv_yf(
+                stock_list, fetch_from, ed_str,
+                progress_cb=_make_cb(prog_bar, prog_text, "일봉 수집"))
+            prog_bar.progress(0.7)
+
+            from backtest.engine_multi_intraday import run_multi_intraday_backtest
+
+            def _make_params(kv, lv, tv,
+                             sbr=None, sad=None, sca=None, ssb=None, swl=None):
+                # range 체크 시 sv값이 None일 수 있으므로 sc 기본값으로 보호
+                _kv  = kv  if kv  is not None else sc.K
+                _lv  = lv  if lv  is not None else sc.LOSS_RATE * 100
+                _tv  = tv  if tv  is not None else sc.TRAILING_STOP_RATE * 100
+                return {
+                    "K": _kv, "LOSS_RATE": _lv/100,
+                    "TRAILING_STOP_RATE": _tv/100,
+                    "TRAILING_STOP_ACTIVATE_RATE": sc.TRAILING_STOP_ACTIVATE_RATE,
+                    "USE_TRAILING_STOP": sc.USE_TRAILING_STOP,
+                    "PROFIT_RATE": sc.PROFIT_RATE,
+                    "INVEST_RATIO": sc.INVEST_RATIO,
+                    "MAX_TRADES_PER_DAY": sc.MAX_TRADES_PER_DAY,
+                    "budget_per_position": budget_per_pos,
+                    # Scorer 배점 (백테스트 격리)
+                    "SCORE_BREAKOUT_MAX": sbr if sbr is not None else (sv_sbr or 40),
+                    "SCORE_AD_LINE":      sad if sad is not None else (sv_sad or 15),
+                    "SCORE_CANDLE":       sca if sca is not None else (sv_sca or 10),
+                    "SCORE_STRONG_BULL":  ssb if ssb is not None else (sv_ssb or 15),
+                    "SCORE_WATCHLIST":    swl if swl is not None else (sv_swl or 10),
+                    "LLM_FIXED":          sv_llm  if sv_llm  is not None else 5,
+                    "DART_FIXED":         sv_dart if sv_dart is not None else 0,
+                    "MIN_SCORE":          sv_minscore if sv_minscore is not None else 0,
+                }
+
+            def _run_one(params):
+                return run_multi_intraday_backtest(
+                    minute_data_by_date, daily_data, stock_list,
+                    initial_capital, params=params
+                )
+
+            if is_bayes:
+                # ── 베이지안 최적화 ─────────────────────────────────
+                from backtest.optimizer import run_bayesian_optimization_multi
+                from backtest.report import calc_sharpe as _calc_sharpe
+
+                # 범위 체크된 파라미터만 최적화 bounds로 등록
+                _bayes_bounds = {}
+                if rng_k:
+                    _bayes_bounds["K"] = (rmin_k, rmax_k)
+                if rng_ls:
+                    _bayes_bounds["LOSS_RATE"] = (rmin_ls / 100, rmax_ls / 100)
+                if rng_tr:
+                    _bayes_bounds["TRAILING_STOP_RATE"] = (rmin_tr / 100, rmax_tr / 100)
+                if rng_sbr:
+                    _bayes_bounds["SCORE_BREAKOUT_MAX"] = (rmin_sbr, rmax_sbr)
+                if rng_sad:
+                    _bayes_bounds["SCORE_AD_LINE"] = (rmin_sad, rmax_sad)
+                if rng_sca:
+                    _bayes_bounds["SCORE_CANDLE"] = (rmin_sca, rmax_sca)
+                if rng_ssb:
+                    _bayes_bounds["SCORE_STRONG_BULL"] = (rmin_ssb, rmax_ssb)
+                if rng_swl:
+                    _bayes_bounds["SCORE_WATCHLIST"] = (rmin_swl, rmax_swl)
+
+                if not _bayes_bounds:
+                    st.warning("베이지안 최적화: 탐색할 파라미터가 없습니다. 최소 1개 이상 '범위' 체크 후 실행하세요.")
                 else:
-                    minute_data  = st.session_state["bt_minute_data"]
-                    daily_data   = st.session_state["bt_daily_data"]
-                    actual_date  = st.session_state["bt_actual_date"]
-                    prog_text.caption("✅ 캐시 데이터 사용")
+                    _trial_counter = [0]
+                    def _bayes_progress_cb(trial_no, total, sharpe):
+                        _trial_counter[0] = trial_no
+                        prog_bar.progress(trial_no / total)
+                        prog_text.caption(f"🧠 Trial {trial_no}/{total}  최근 샤프={sharpe:.4f}")
 
-                from backtest.engine_intraday import run_intraday_backtest
+                    # 기본 params에 현재 UI 값 반영 (범위 미설정 파라미터는 고정값)
+                    _base_params = _make_params(sv_k, sv_ls, sv_tr)
 
-                def _make_params(kv, lv, tv,
-                                 sbr=None, sad=None, sca=None, ssb=None, swl=None):
-                    return {
-                        "K": kv, "LOSS_RATE": lv/100,
-                        "TRAILING_STOP_RATE": tv/100,
-                        "TRAILING_STOP_ACTIVATE_RATE": sc.TRAILING_STOP_ACTIVATE_RATE,
-                        "USE_TRAILING_STOP": sc.USE_TRAILING_STOP,
-                        "PROFIT_RATE": sc.PROFIT_RATE,
-                        "INVEST_RATIO": sc.INVEST_RATIO,
-                        "MAX_TRADES_PER_DAY": sc.MAX_TRADES_PER_DAY,
-                        "budget_per_position": budget_per_pos,
-                        # Scorer 배점 (백테스트 격리)
-                        "SCORE_BREAKOUT_MAX": sbr if sbr is not None else sv_sbr,
-                        "SCORE_AD_LINE":      sad if sad is not None else sv_sad,
-                        "SCORE_CANDLE":       sca if sca is not None else sv_sca,
-                        "SCORE_STRONG_BULL":  ssb if ssb is not None else sv_ssb,
-                        "SCORE_WATCHLIST":    swl if swl is not None else sv_swl,
-                        "LLM_FIXED":          sv_llm,
-                        "DART_FIXED":         sv_dart,
-                        "MIN_SCORE":          sv_minscore,
-                    }
-
-                def _run_one(params):
-                    return run_intraday_backtest(
-                        minute_data, daily_data, stock_list, actual_date,
-                        initial_capital, params=params
+                    opt_result = run_bayesian_optimization_multi(
+                        minute_data_by_date, daily_data, stock_list,
+                        initial_capital, _bayes_bounds, n_trials=n_trials,
+                        progress_cb=_bayes_progress_cb,
                     )
-
-                if is_bayes:
-                    # ── 베이지안 최적화 ─────────────────────────────────
-                    from backtest.optimizer import run_bayesian_optimization
-                    from backtest.report import calc_sharpe as _calc_sharpe
-
-                    # 범위 체크된 파라미터만 최적화 bounds로 등록
-                    _bayes_bounds = {}
-                    if rng_k:
-                        _bayes_bounds["K"] = (rmin_k, rmax_k)
-                    if rng_ls:
-                        _bayes_bounds["LOSS_RATE"] = (rmin_ls / 100, rmax_ls / 100)
-                    if rng_tr:
-                        _bayes_bounds["TRAILING_STOP_RATE"] = (rmin_tr / 100, rmax_tr / 100)
-                    if rng_sbr:
-                        _bayes_bounds["SCORE_BREAKOUT_MAX"] = (rmin_sbr, rmax_sbr)
-                    if rng_sad:
-                        _bayes_bounds["SCORE_AD_LINE"] = (rmin_sad, rmax_sad)
-                    if rng_sca:
-                        _bayes_bounds["SCORE_CANDLE"] = (rmin_sca, rmax_sca)
-                    if rng_ssb:
-                        _bayes_bounds["SCORE_STRONG_BULL"] = (rmin_ssb, rmax_ssb)
-                    if rng_swl:
-                        _bayes_bounds["SCORE_WATCHLIST"] = (rmin_swl, rmax_swl)
-
-                    if not _bayes_bounds:
-                        st.warning("베이지안 최적화: 탐색할 파라미터가 없습니다. 최소 1개 이상 '범위' 체크 후 실행하세요.")
-                    else:
-                        _trial_counter = [0]
-                        def _bayes_progress_cb(trial_no, total, sharpe):
-                            _trial_counter[0] = trial_no
-                            prog_bar.progress(trial_no / total)
-                            prog_text.caption(f"🧠 Trial {trial_no}/{total}  최근 샤프={sharpe:.4f}")
-
-                        # 기본 params에 현재 UI 값 반영 (범위 미설정 파라미터는 고정값)
-                        _base_params = _make_params(sv_k, sv_ls, sv_tr)
-
-                        opt_result = run_bayesian_optimization(
-                            minute_data, daily_data, stock_list, actual_date,
-                            initial_capital, _bayes_bounds, n_trials=n_trials,
-                            progress_cb=_bayes_progress_cb,
-                        )
-                        prog_bar.progress(1.0)
-                        prog_text.caption(f"✅ {opt_result['n_trials']}회 탐색 완료!  최고 샤프={opt_result['best_sharpe']:.4f}")
-                        st.session_state["bt_bayes"]  = opt_result
-                        st.session_state.pop("bt_result", None)
-                        st.session_state.pop("bt_grid",   None)
-
-                elif is_grid:
-                    # ── 그리드 서치 ────────────────────────────────────
-                    k_vals   = _range_values(rng_k,  sv_k,  rmin_k,  rmax_k,  rstep_k)
-                    ls_vals  = _range_values(rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls)
-                    tr_vals  = _range_values(rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr)
-                    sbr_vals = _range_values(rng_sbr, sv_sbr, rmin_sbr, rmax_sbr, rstep_sbr)
-                    sad_vals = _range_values(rng_sad, sv_sad, rmin_sad, rmax_sad, rstep_sad)
-                    sca_vals = _range_values(rng_sca, sv_sca, rmin_sca, rmax_sca, rstep_sca)
-                    ssb_vals = _range_values(rng_ssb, sv_ssb, rmin_ssb, rmax_ssb, rstep_ssb)
-                    swl_vals = _range_values(rng_swl, sv_swl, rmin_swl, rmax_swl, rstep_swl)
-
-                    import itertools
-                    combos = list(itertools.product(k_vals, ls_vals, tr_vals,
-                                                    sbr_vals, sad_vals, sca_vals, ssb_vals, swl_vals))
-                    total_combos = len(combos)
-                    grid_rows, combo_i = [], 0
-                    for (kv, lv, tv, sbrv, sadv, scav, ssbv, swlv) in combos:
-                        combo_i += 1
-                        prog_bar.progress(combo_i / total_combos)
-                        prog_text.caption(f"⚙️ ({combo_i}/{total_combos})  손절={lv}% 트레일={tv}%")
-                        r = _run_one(_make_params(kv, lv, tv, sbr=sbrv, sad=sadv, sca=scav, ssb=ssbv, swl=swlv))
-                        ret, n_tr, wr, mdd = _calc_summary(r)
-                        from backtest.report import calc_sharpe as _cs
-                        row = {"K": kv, "손절(%)": lv, "트레일(%)": tv}
-                        if rng_sbr: row["돌파점"] = sbrv
-                        if rng_sad: row["AD점"]   = sadv
-                        if rng_sca: row["캔들점"] = scav
-                        if rng_ssb: row["강봉점"] = ssbv
-                        if rng_swl: row["관심점"] = swlv
-                        row.update({"전체수익률(%)": round(ret, 2), "거래수": n_tr,
-                                    "승률(%)": round(wr, 1), "MDD(%)": round(mdd, 2),
-                                    "샤프비율": round(_cs(r), 4)})
-                        grid_rows.append(row)
-                        _save_log({"timestamp": datetime.now().isoformat(), "type": "intraday_grid",
-                                   "date": actual_date, "K": kv, "loss_pct": lv, "trail_pct": tv,
-                                   "initial_capital": initial_capital, "return_pct": round(ret, 2),
-                                   "trades": n_tr, "win_rate": round(wr, 1), "mdd": round(mdd, 2)})
-                    prog_bar.progress(1.0); prog_text.caption(f"✅ {total_combos}개 조합 완료!")
-                    st.session_state["bt_grid"]   = grid_rows
+                    prog_bar.progress(1.0)
+                    prog_text.caption(f"✅ {opt_result['n_trials']}회 탐색 완료!  최고 샤프={opt_result['best_sharpe']:.4f}")
+                    st.session_state["bt_bayes"]  = opt_result
                     st.session_state.pop("bt_result", None)
-                    st.session_state.pop("bt_bayes",  None)
-                else:
-                    # ── 단일 실행 ──────────────────────────────────────
-                    prog_text.caption("⚙️ 계산 중...")
-                    result = _run_one(_make_params(sv_k, sv_ls, sv_tr))
-                    prog_bar.progress(1.0); prog_text.caption("✅ 완료!")
-                    st.session_state["bt_result"] = result
-                    st.session_state.pop("bt_grid",  None)
-                    st.session_state.pop("bt_bayes", None)
-                    ret, n_tr, wr, mdd = _calc_summary(result)
-                    _save_log({"timestamp": datetime.now().isoformat(), "type": "intraday",
-                               "date": actual_date, "K": sv_k, "loss_pct": sv_ls, "trail_pct": sv_tr,
+                    st.session_state.pop("bt_grid",   None)
+
+            elif is_grid:
+                # ── 그리드 서치 ────────────────────────────────────
+                k_vals   = _range_values(rng_k,  sv_k,  rmin_k,  rmax_k,  rstep_k)
+                ls_vals  = _range_values(rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls)
+                tr_vals  = _range_values(rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr)
+                sbr_vals = _range_values(rng_sbr, sv_sbr, rmin_sbr, rmax_sbr, rstep_sbr)
+                sad_vals = _range_values(rng_sad, sv_sad, rmin_sad, rmax_sad, rstep_sad)
+                sca_vals = _range_values(rng_sca, sv_sca, rmin_sca, rmax_sca, rstep_sca)
+                ssb_vals = _range_values(rng_ssb, sv_ssb, rmin_ssb, rmax_ssb, rstep_ssb)
+                swl_vals = _range_values(rng_swl, sv_swl, rmin_swl, rmax_swl, rstep_swl)
+
+                import itertools
+                combos = list(itertools.product(k_vals, ls_vals, tr_vals,
+                                                sbr_vals, sad_vals, sca_vals, ssb_vals, swl_vals))
+                total_combos = len(combos)
+                grid_rows, combo_i = [], 0
+                for (kv, lv, tv, sbrv, sadv, scav, ssbv, swlv) in combos:
+                    combo_i += 1
+                    prog_bar.progress(combo_i / total_combos)
+                    prog_text.caption(f"⚙️ ({combo_i}/{total_combos})  손절={lv}% 트레일={tv}%")
+                    r = _run_one(_make_params(kv, lv, tv, sbr=sbrv, sad=sadv, sca=scav, ssb=ssbv, swl=swlv))
+                    ret, n_tr, wr, mdd = _calc_summary(r)
+                    from backtest.report import calc_sharpe as _cs
+                    row = {"K": kv, "손절(%)": lv, "트레일(%)": tv}
+                    if rng_sbr: row["돌파점"] = sbrv
+                    if rng_sad: row["AD점"]   = sadv
+                    if rng_sca: row["캔들점"] = scav
+                    if rng_ssb: row["강봉점"] = ssbv
+                    if rng_swl: row["관심점"] = swlv
+                    row.update({"전체수익률(%)": round(ret, 2), "거래수": n_tr,
+                                "승률(%)": round(wr, 1), "MDD(%)": round(mdd, 2),
+                                "샤프비율": round(_cs(r), 4)})
+                    grid_rows.append(row)
+                    _save_log({"timestamp": datetime.now().isoformat(), "type": "intraday_grid",
+                               "date": sd_str, "K": kv, "loss_pct": lv, "trail_pct": tv,
                                "initial_capital": initial_capital, "return_pct": round(ret, 2),
                                "trades": n_tr, "win_rate": round(wr, 1), "mdd": round(mdd, 2)})
+                prog_bar.progress(1.0); prog_text.caption(f"✅ {total_combos}개 조합 완료!")
+                st.session_state["bt_grid"]   = grid_rows
+                st.session_state.pop("bt_result", None)
+                st.session_state.pop("bt_bayes",  None)
+            else:
+                # ── 단일 실행 ──────────────────────────────────────
+                prog_text.caption("⚙️ 계산 중...")
+                result = _run_one(_make_params(sv_k, sv_ls, sv_tr))
+                prog_bar.progress(1.0); prog_text.caption("✅ 완료!")
+                result["_period"] = {
+                    "sd":      sd_str,
+                    "ed":      ed_str,
+                    "n_dates": len(minute_data_by_date),
+                }
+                st.session_state["bt_result"] = result
+                st.session_state.pop("bt_grid",  None)
+                st.session_state.pop("bt_bayes", None)
+                ret, n_tr, wr, mdd = _calc_summary(result)
+                _save_log({"timestamp": datetime.now().isoformat(), "type": "intraday",
+                           "date": sd_str, "K": sv_k, "loss_pct": sv_ls, "trail_pct": sv_tr,
+                           "initial_capital": initial_capital, "return_pct": round(ret, 2),
+                           "trades": n_tr, "win_rate": round(wr, 1), "mdd": round(mdd, 2)})
 
         except Exception as e:
             prog_text.empty()

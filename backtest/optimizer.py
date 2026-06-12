@@ -57,6 +57,38 @@ def run_bayesian_optimization(
     return _study_to_result(study)
 
 
+def run_bayesian_optimization_multi(
+    minute_data_by_date, daily_data, stock_list,
+    initial_capital, param_bounds, n_trials=50,
+    progress_cb=None,
+):
+    """
+    분봉 기반 다중 날짜 단타 백테스트에 베이지안 최적화 적용.
+
+    minute_data_by_date : {date: {code: [bars]}}
+    daily_data          : {code: {date: ohlcv_row}}
+    param_bounds        : {param_name: (min, max), ...}
+    반환                : {"study","best_params","best_sharpe","best_trial",
+                           "n_trials","all_trials"}
+    """
+    _require_optuna()
+    from backtest.engine_multi_intraday import run_multi_intraday_backtest
+
+    def objective(trial):
+        params = _suggest_params(trial, param_bounds)
+        result = run_multi_intraday_backtest(
+            minute_data_by_date, daily_data, stock_list, initial_capital, params
+        )
+        sharpe = calc_sharpe(result)
+        if progress_cb:
+            progress_cb(trial.number + 1, n_trials, sharpe)
+        return sharpe
+
+    study = _new_study()
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    return _study_to_result(study)
+
+
 def run_bayesian_optimization_daily(
     all_data, stock_list, start_date, end_date,
     initial_capital, param_bounds, n_trials=50,

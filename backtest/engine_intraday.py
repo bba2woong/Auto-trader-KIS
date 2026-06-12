@@ -201,12 +201,20 @@ def _is_strong_bull(candle) -> bool:
 
 def _build_candidates(minute_data, daily_data, stock_list, date, params):
     """
-    목표가 + AD상승 + (선택) 60분봉 강봉 감지 기준으로 후보 종목 목록 생성.
-    오늘 시가는 분봉 첫 번째 봉의 open 사용.
-    정렬: 목표가 낮은 순.
+    목표가 + AD상승 + compute_tech_score(params) 기준으로 후보 종목 목록 생성.
+    MIN_SCORE 필터 적용 → 점수 내림차순 정렬.
     """
-    result      = []
-    strong_cnt  = 0   # 디버그: 강봉 감지 종목 수
+    from backtest.screener_sim import compute_tech_score
+
+    try:
+        from watchlist import WATCHLIST_CODES
+        wl_codes = set(WATCHLIST_CODES)
+    except Exception:
+        wl_codes = set()
+
+    result     = []
+    min_score  = params.get("MIN_SCORE", 0)
+    strong_cnt = 0
 
     for stock in stock_list:
         code = stock["code"]
@@ -214,10 +222,8 @@ def _build_candidates(minute_data, daily_data, stock_list, date, params):
         if not bars:
             continue
 
-        # 오늘 시가 (첫 분봉)
         today_open = bars[0]["open"]
 
-        # 전일 데이터
         dmap  = daily_data.get(code, {})
         dates = sorted(dmap.keys())
         if date not in dates:
@@ -232,28 +238,43 @@ def _build_candidates(minute_data, daily_data, stock_list, date, params):
             continue
         target = today_open + prev_range * params["K"]
 
-        # AD Line 상승 여부 (일봉 기준)
         window = [dmap[d] for d in dates[max(0, idx - 4): idx + 1]]
         if not _ad_rising(window):
             continue
 
-        # 60분봉 강봉 감지 — 09:00~09:59 봉 집계 (SCAN_START 직전 시간)
-        hour_candle  = _agg_hour_candle(bars, 9)   # 09시봉
-        strong_bull  = _is_strong_bull(hour_candle)
+        hour_candle = _agg_hour_candle(bars, 9)
+        strong_bull = _is_strong_bull(hour_candle)
         if strong_bull:
             strong_cnt += 1
 
+        today_d = dmap[date]
+        from backtest.screener_sim import _is_hammer as _sim_hammer
+        hammer = _sim_hammer(today_d)
+
+        sr = {
+            "변동성돌파": True,
+            "돌파여유율": 0,
+            "AD상승":     True,
+            "패턴":       "hammer" if hammer else None,
+            "시간봉패턴": "strong_bull" if strong_bull else None,
+            "watchlist":  code in wl_codes,
+        }
+        score = compute_tech_score(sr, params)
+
+        if score < min_score:
+            continue
+
         result.append({
             **stock,
-            "target":      int(target),
-            "today_open":  today_open,
-            "시간봉패턴":  "strong_bull" if strong_bull else None,
+            "target":     int(target),
+            "today_open": today_open,
+            "시간봉패턴": "strong_bull" if strong_bull else None,
+            "score":      score,
         })
 
-    # 목표가 낮은 순 정렬
-    result.sort(key=lambda x: x["target"])
+    # 점수 내림차순 정렬 (동점이면 목표가 낮은 순)
+    result.sort(key=lambda x: (-x["score"], x["target"]))
 
-    # 디버그 출력
     print(f"  [backtest] 후보: {len(result)}개 "
           f"(강봉 {strong_cnt}개 / AD통과 {len(result)}개 "
           f"/ 전체 분봉종목 {sum(1 for s in stock_list if minute_data.get(s['code']))}개)")
