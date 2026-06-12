@@ -1001,10 +1001,10 @@ def _show_grid_result(grid_rows):
     df       = df.sort_values(sort_col, ascending=False)
 
     fixed      = {"K","손절(%)","트레일(%)","전체수익률(%)","수익률(%)","거래수","승률(%)","MDD(%)",
-                  "돌파점","AD점","캔들점","강봉점","관심점"}
+                  "돌파점","AD점","캔들점","강봉점","관심점","샤프비율"}
     stock_cols = [c for c in df.columns if c not in fixed]
     sharpe_col = ["샤프비율"] if "샤프비율" in df.columns else []
-    color_cols = [sort_col] + stock_cols + sharpe_col   # 수익률/샤프 컬럼에 색상 적용
+    color_cols = [c for c in [sort_col] + stock_cols + sharpe_col if c in df.columns]
 
     st.dataframe(
         df.style.map(_pnl_color, subset=color_cols),
