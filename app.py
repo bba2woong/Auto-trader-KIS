@@ -1015,19 +1015,15 @@ with tab_backtest:
             bt_date = st.date_input("날짜 (최근 7일 이내)", value=datetime.now() - timedelta(days=1))
         with col3:
             initial_capital = st.number_input("초기 자금 (원)", value=10_000_000, step=1_000_000)
-        pool_option = st.selectbox(
-            "종목 풀",
-            ["kospi", "watchlist", "custom", "full"],
-            format_func=lambda x: {
-                "kospi":     f"코스피200 상위 {sc.KOSPI_POOL_SIZE}개 + 관심종목",
-                "watchlist": "관심종목만",
-                "custom":    "직접 입력",
-                "full":      "전체 풀 (KOSPI200 전체 + 관심종목)",
-            }[x],
-            key="bt_intraday_pool",
-        )
-        custom_codes = st.text_input("종목 코드 (콤마 구분)", placeholder="005930,000660",
-                                     key="bt_custom_codes_intraday") if pool_option == "custom" else ""
+        st.caption(f"종목 풀: 사이드바 설정 사용 (코스피 상위 {sc.KOSPI_POOL_SIZE}개 + 관심종목)")
+        _use_custom = st.checkbox("직접 종목 입력", key="bt_intraday_custom")
+        if _use_custom:
+            custom_codes = st.text_input("종목 코드 (콤마 구분)", placeholder="005930,000660",
+                                         key="bt_custom_codes_intraday")
+            pool_option  = "custom"
+        else:
+            custom_codes = ""
+            pool_option  = "kospi"
 
     # ── 파라미터 범위 설정 (단타 전용) ──
     if bt_type == "intraday":
@@ -1175,12 +1171,7 @@ with tab_backtest:
         prog_text = st.empty()
         try:
             if bt_type == "intraday":
-                # 항상 선택된 종목 풀 전체 백테스팅
-                if pool_option == "full":
-                    from backtest.screener_sim import get_full_stock_pool
-                    stock_list = get_full_stock_pool()
-                else:
-                    stock_list = _build_stock_list_ui(pool_option, custom_codes)
+                stock_list     = _build_stock_list_ui(pool_option, custom_codes)
                 budget_per_pos = initial_capital / sc.MAX_POSITIONS
             else:
                 stock_list     = _build_stock_list_ui(pool_option, custom_codes)
