@@ -703,9 +703,21 @@ def run_scheduler():
 
         wait_until_market_open()
 
-        # 09:00 직후 KIS 서버 Rate Limit 완화 대기 (수만 건 동시 접속 분산)
-        print(f"[{get_now()}] 잔고 조회 전 5초 대기 (서버 부하 분산)...")
-        time.sleep(10)
+        # 09:00~09:01 사이 시작 시 KIS Daily 토큰 발급 완료 대기
+        # 정규장 시작과 동시에 수만 건 접속이 몰려 토큰 발급이 지연되므로
+        # 60초 대기 후 토큰을 강제 재발급하고 스크리닝을 시작한다.
+        # 09:02 이후 재시작이면 이미 안정화됐으므로 대기 생략.
+        _now_hm = datetime.now().strftime("%H:%M")
+        if sc.MARKET_OPEN <= _now_hm <= "09:01":
+            print(f"[{get_now()}] 09:00 직후 — 60초 대기 후 토큰 재발급 (KIS 안정화)...")
+            time.sleep(60)
+        try:
+            from auth import invalidate_token, get_access_token
+            invalidate_token()
+            get_access_token()
+            print(f"[{get_now()}] ✅ 토큰 재발급 완료")
+        except Exception as _e:
+            print(f"[{get_now()}] ⚠️ 토큰 재발급 실패 ({_e}) — 계속 진행")
 
         # 포지션당 예산 (장 시작 시 1회 계산)
         print(f"\n[{get_now()}] 포지션 예산 계산 중...")
