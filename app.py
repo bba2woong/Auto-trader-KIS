@@ -929,6 +929,39 @@ def _pnl_color(val):
     return f"background-color: {color}; color: {text_col}"
 
 
+def _show_bayes_result(opt_result):
+    """베이지안 최적화 결과 표시"""
+    st.subheader(f"🧠 베이지안 최적화 결과  ({opt_result['n_trials']}회 탐색)")
+    best_p = opt_result["best_params"]
+    best_s = opt_result["best_sharpe"]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("최고 샤프 비율", f"{best_s:.4f}")
+        st.caption(f"Trial #{opt_result['best_trial']} 에서 달성")
+    with col2:
+        st.markdown("**최적 파라미터**")
+        for k, v in best_p.items():
+            if isinstance(v, float):
+                # LOSS_RATE / TRAILING_STOP_RATE → % 변환
+                if "RATE" in k and v < 1.0:
+                    st.caption(f"`{k}` = **{v*100:.2f}%**")
+                else:
+                    st.caption(f"`{k}` = **{v:.4f}**")
+            else:
+                st.caption(f"`{k}` = **{v}**")
+
+    # 전체 trial 결과 테이블
+    with st.expander("📋 전체 Trial 결과 보기", expanded=False):
+        trial_df = pd.DataFrame(opt_result["all_trials"])
+        if not trial_df.empty:
+            trial_df = trial_df.sort_values("sharpe", ascending=False)
+            st.dataframe(
+                trial_df.style.map(_pnl_color, subset=["sharpe"]),
+                use_container_width=True, hide_index=True,
+            )
+
+
 def _show_grid_result(grid_rows):
     """파라미터 범위 그리드 결과 테이블"""
     st.subheader(f"파라미터 최적화 결과  ({len(grid_rows)}개 조합)")
@@ -936,9 +969,11 @@ def _show_grid_result(grid_rows):
     sort_col = "전체수익률(%)" if "전체수익률(%)" in df.columns else "수익률(%)"
     df       = df.sort_values(sort_col, ascending=False)
 
-    fixed      = {"K","손절(%)","트레일(%)","전체수익률(%)","수익률(%)","거래수","승률(%)","MDD(%)"}
+    fixed      = {"K","손절(%)","트레일(%)","전체수익률(%)","수익률(%)","거래수","승률(%)","MDD(%)",
+                  "돌파점","AD점","캔들점","강봉점","관심점"}
     stock_cols = [c for c in df.columns if c not in fixed]
-    color_cols = [sort_col] + stock_cols   # 수익률 관련 컬럼에 색상 적용
+    sharpe_col = ["샤프비율"] if "샤프비율" in df.columns else []
+    color_cols = [sort_col] + stock_cols + sharpe_col   # 수익률/샤프 컬럼에 색상 적용
 
     st.dataframe(
         df.style.map(_pnl_color, subset=color_cols),
@@ -1057,14 +1092,25 @@ with tab_backtest:
             n_positions       = sc.MAX_POSITIONS
 
         st.divider()
-        st.markdown("##### 📐 파라미터 범위 설정")
-        st.caption("범위 체크 시 모든 조합을 캐시 데이터로 한번에 계산합니다.")
+        st.markdown("##### 📐 파라미터 설정")
+
+        opt_mode = st.radio(
+            "최적화 방식",
+            ["none", "grid", "bayesian"],
+            format_func=lambda x: {"none": "▶ 단일 실행", "grid": "🔲 그리드 서치", "bayesian": "🧠 베이지안 최적화"}[x],
+            horizontal=True,
+            key="bt_opt_mode",
+        )
+        if opt_mode == "grid":
+            st.caption("범위 체크 시 모든 조합을 캐시 데이터로 한번에 계산합니다.")
+        elif opt_mode == "bayesian":
+            st.caption("optuna TPE 샘플러로 샤프 비율 최대화 파라미터를 자동 탐색합니다.")
 
         def _param_row(label, single_val, single_min, single_max, single_step,
                        r_min_def, r_max_def, r_step_def, fmt=".2f"):
             c1, c2, c3, c4, c5 = st.columns([2, 1.5, 1.5, 1.5, 1.5])
             with c1:
-                use_range = st.checkbox(f"범위: {label}", key=f"rng_{label}")
+                use_range = st.checkbox(f"범위: {label}", key=f"rng_{label}") if opt_mode != "none" else False
             if use_range:
                 with c2: rmin = st.number_input("최소", value=r_min_def, step=r_step_def, key=f"rmin_{label}", format=f"%{fmt}")
                 with c3: rmax = st.number_input("최대", value=r_max_def, step=r_step_def, key=f"rmax_{label}", format=f"%{fmt}")
@@ -1078,14 +1124,47 @@ with tab_backtest:
                                               key=f"sv_{label}", format=f"%{fmt}")
                 return use_range, sv, None, None, None
 
-        # 단타 로그 기반: K 제거 (진입가 이미 확정), 손절/트레일만
-        sv_k   = sc.K   # K는 고정값으로만 사용 (그리드 불필요)
-        rng_k  = False; rmin_k = rmax_k = rstep_k = None
-        rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls  = _param_row("손절(%)",  sc.LOSS_RATE*100,          0.5, 5.0, 0.1, 1.0, 4.0, 0.5, ".1f")
-        rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr  = _param_row("트레일(%)", sc.TRAILING_STOP_RATE*100, 0.5, 5.0, 0.1, 1.0, 4.0, 0.5, ".1f")
-        is_grid = rng_ls or rng_tr
+        st.markdown("**트레이딩 파라미터**")
+        _log_mode_params = pool_option == "log_based" and bool(selected_codes)
+        if not _log_mode_params:
+            rng_k, sv_k, rmin_k, rmax_k, rstep_k = _param_row("K값",     sc.K,                      0.1, 1.0, 0.05, 0.3, 0.7, 0.1, ".2f")
+        else:
+            sv_k = sc.K; rng_k = False; rmin_k = rmax_k = rstep_k = None
+        rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls = _param_row("손절(%)",  sc.LOSS_RATE*100,          0.5, 5.0, 0.1,  1.0, 4.0, 0.5, ".1f")
+        rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr = _param_row("트레일(%)", sc.TRAILING_STOP_RATE*100, 0.5, 5.0, 0.1,  1.0, 4.0, 0.5, ".1f")
+
+        with st.expander("🤖 Scorer 점수 배점 파라미터", expanded=False):
+            rng_sbr, sv_sbr, rmin_sbr, rmax_sbr, rstep_sbr = _param_row("변동성돌파(최대점)", 40.0, 10.0, 60.0, 1.0, 20.0, 60.0, 5.0, ".0f")
+            rng_sad, sv_sad, rmin_sad, rmax_sad, rstep_sad = _param_row("AD Line 점수",      15.0,  5.0, 30.0, 1.0,  5.0, 25.0, 5.0, ".0f")
+            rng_sca, sv_sca, rmin_sca, rmax_sca, rstep_sca = _param_row("캔들패턴(해머)",    10.0,  0.0, 20.0, 1.0,  0.0, 20.0, 5.0, ".0f")
+            rng_ssb, sv_ssb, rmin_ssb, rmax_ssb, rstep_ssb = _param_row("강봉(60분) 점수",  15.0,  0.0, 30.0, 1.0,  5.0, 25.0, 5.0, ".0f")
+            rng_swl, sv_swl, rmin_swl, rmax_swl, rstep_swl = _param_row("관심종목 보너스",  10.0,  0.0, 20.0, 1.0,  0.0, 20.0, 5.0, ".0f")
+            sv_llm      = st.number_input("LLM 고정 점수 (백테스트용, 중립=5)",  min_value=0,   max_value=10,  value=5,                      step=1, key="sv_llm_fixed")
+            sv_dart     = st.number_input("DART 고정 점수 (백테스트용, 중립=0)", min_value=-10, max_value=10,  value=0,                      step=1, key="sv_dart_fixed")
+            sv_minscore = st.number_input("스크리닝 최소 점수 (MIN_SCORE)",      min_value=0,   max_value=100, value=sc.CONFIRM_SCORE_MIN,   step=5, key="sv_min_score")
+
+        if opt_mode == "bayesian":
+            n_trials = st.slider("베이지안 시도 횟수 (n_trials)", 10, 200, 50, key="bt_n_trials")
+        else:
+            n_trials = 50
+
+        is_grid  = (opt_mode == "grid") and (
+            rng_k or rng_ls or rng_tr or
+            rng_sbr or rng_sad or rng_sca or rng_ssb or rng_swl
+        )
+        is_bayes = opt_mode == "bayesian"
     else:
-        is_grid = False
+        is_grid = False; is_bayes = False
+        opt_mode = "none"; n_trials = 50
+        sv_k = sc.K; sv_ls = sc.LOSS_RATE * 100; sv_tr = sc.TRAILING_STOP_RATE * 100
+        rng_k = rng_ls = rng_tr = False
+        rmin_k = rmax_k = rstep_k = rmin_ls = rmax_ls = rstep_ls = rmin_tr = rmax_tr = rstep_tr = None
+        sv_sbr = 40.0; sv_sad = 15.0; sv_sca = 10.0; sv_ssb = 15.0; sv_swl = 10.0
+        sv_llm = 5; sv_dart = 0; sv_minscore = sc.CONFIRM_SCORE_MIN
+        rng_sbr = rng_sad = rng_sca = rng_ssb = rng_swl = False
+        rmin_sbr = rmax_sbr = rstep_sbr = rmin_sad = rmax_sad = rstep_sad = None
+        rmin_sca = rmax_sca = rstep_sca = rmin_ssb = rmax_ssb = rstep_ssb = None
+        rmin_swl = rmax_swl = rstep_swl = None
 
     # ── 단타: 종목/파라미터 변경 감지 → 결과 자동 초기화 ──
     if bt_type == "intraday":
@@ -1095,11 +1174,15 @@ with tab_backtest:
             round(sv_ls, 2) if not rng_ls else (round(rmin_ls,2), round(rmax_ls,2), round(rstep_ls,2)),
             round(sv_tr, 2) if not rng_tr else (round(rmin_tr,2), round(rmax_tr,2), round(rstep_tr,2)),
             bt_date.strftime("%Y%m%d"),
+            opt_mode,
+            round(sv_sbr), round(sv_sad), round(sv_sca), round(sv_ssb), round(sv_swl),
+            sv_llm, sv_dart, sv_minscore,
         )
         if st.session_state.get("bt_fingerprint") != _fingerprint:
             st.session_state["bt_fingerprint"] = _fingerprint
             st.session_state.pop("bt_result", None)
             st.session_state.pop("bt_grid",   None)
+            st.session_state.pop("bt_bayes",  None)
 
     # ── 캐시 상태 표시 (단타) ──
     if bt_type == "intraday":
@@ -1150,7 +1233,9 @@ with tab_backtest:
                 from backtest.engine import run_backtest
                 all_data = fetch_multi_ohlcv(stock_list, sd, ed, progress_cb=_make_cb(prog_bar, prog_text, "일봉 수집"))
                 prog_text.caption("⚙️ 계산 중...")
-                result = run_backtest(all_data, stock_list, sd, ed, initial_capital)
+                from backtest.screener_sim import get_default_bt_params as _gdp
+                _daily_params = _gdp()
+                result = run_backtest(all_data, stock_list, sd, ed, initial_capital, params=_daily_params)
                 prog_bar.progress(1.0); prog_text.caption("✅ 완료!")
                 st.session_state["bt_result"] = result
                 st.session_state.pop("bt_grid", None)
@@ -1189,7 +1274,8 @@ with tab_backtest:
                 from backtest.engine_intraday import run_intraday_backtest, run_log_intraday_backtest
                 is_log_mode = has_log   # 로그 있고 종목 선택된 경우만 True
 
-                def _make_params(kv, lv, tv):
+                def _make_params(kv, lv, tv,
+                                 sbr=None, sad=None, sca=None, ssb=None, swl=None):
                     return {
                         "K": kv, "LOSS_RATE": lv/100,
                         "TRAILING_STOP_RATE": tv/100,
@@ -1199,6 +1285,15 @@ with tab_backtest:
                         "INVEST_RATIO": sc.INVEST_RATIO,
                         "MAX_TRADES_PER_DAY": sc.MAX_TRADES_PER_DAY,
                         "budget_per_position": budget_per_pos,
+                        # Scorer 배점 (백테스트 격리)
+                        "SCORE_BREAKOUT_MAX": sbr if sbr is not None else sv_sbr,
+                        "SCORE_AD_LINE":      sad if sad is not None else sv_sad,
+                        "SCORE_CANDLE":       sca if sca is not None else sv_sca,
+                        "SCORE_STRONG_BULL":  ssb if ssb is not None else sv_ssb,
+                        "SCORE_WATCHLIST":    swl if swl is not None else sv_swl,
+                        "LLM_FIXED":          sv_llm,
+                        "DART_FIXED":         sv_dart,
+                        "MIN_SCORE":          sv_minscore,
                     }
 
                 def _run_one(params):
@@ -1213,51 +1308,112 @@ with tab_backtest:
                             initial_capital, params=params
                         )
 
-                if is_grid:
-                    # 로그 모드: K는 진입에 영향 없으므로 K 그리드 제거
-                    k_vals  = _range_values(rng_k,  sv_k,  rmin_k,  rmax_k,  rstep_k) if not is_log_mode \
-                              else [sv_k]
-                    ls_vals = _range_values(rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls)
-                    tr_vals = _range_values(rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr)
-                    total_combos = len(k_vals) * len(ls_vals) * len(tr_vals)
+                if is_bayes:
+                    # ── 베이지안 최적화 ─────────────────────────────────
+                    from backtest.optimizer import run_bayesian_optimization
+                    from backtest.report import calc_sharpe as _calc_sharpe
+
+                    # 범위 체크된 파라미터만 최적화 bounds로 등록
+                    _bayes_bounds = {}
+                    if not is_log_mode and rng_k:
+                        _bayes_bounds["K"] = (rmin_k, rmax_k)
+                    if rng_ls:
+                        _bayes_bounds["LOSS_RATE"] = (rmin_ls / 100, rmax_ls / 100)
+                    if rng_tr:
+                        _bayes_bounds["TRAILING_STOP_RATE"] = (rmin_tr / 100, rmax_tr / 100)
+                    if rng_sbr:
+                        _bayes_bounds["SCORE_BREAKOUT_MAX"] = (rmin_sbr, rmax_sbr)
+                    if rng_sad:
+                        _bayes_bounds["SCORE_AD_LINE"] = (rmin_sad, rmax_sad)
+                    if rng_sca:
+                        _bayes_bounds["SCORE_CANDLE"] = (rmin_sca, rmax_sca)
+                    if rng_ssb:
+                        _bayes_bounds["SCORE_STRONG_BULL"] = (rmin_ssb, rmax_ssb)
+                    if rng_swl:
+                        _bayes_bounds["SCORE_WATCHLIST"] = (rmin_swl, rmax_swl)
+
+                    if not _bayes_bounds:
+                        st.warning("베이지안 최적화: 탐색할 파라미터가 없습니다. 최소 1개 이상 '범위' 체크 후 실행하세요.")
+                    else:
+                        _trial_counter = [0]
+                        def _bayes_progress_cb(trial_no, total, sharpe):
+                            _trial_counter[0] = trial_no
+                            prog_bar.progress(trial_no / total)
+                            prog_text.caption(f"🧠 Trial {trial_no}/{total}  최근 샤프={sharpe:.4f}")
+
+                        # 기본 params에 현재 UI 값 반영 (범위 미설정 파라미터는 고정값)
+                        _base_params = _make_params(sv_k, sv_ls, sv_tr)
+
+                        opt_result = run_bayesian_optimization(
+                            minute_data, daily_data, stock_list, actual_date,
+                            initial_capital, _bayes_bounds, n_trials=n_trials,
+                            progress_cb=_bayes_progress_cb,
+                        )
+                        prog_bar.progress(1.0)
+                        prog_text.caption(f"✅ {opt_result['n_trials']}회 탐색 완료!  최고 샤프={opt_result['best_sharpe']:.4f}")
+                        st.session_state["bt_bayes"]  = opt_result
+                        st.session_state.pop("bt_result", None)
+                        st.session_state.pop("bt_grid",   None)
+
+                elif is_grid:
+                    # ── 그리드 서치 ────────────────────────────────────
+                    k_vals   = _range_values(rng_k,  sv_k,  rmin_k,  rmax_k,  rstep_k) if not is_log_mode else [sv_k]
+                    ls_vals  = _range_values(rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls)
+                    tr_vals  = _range_values(rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr)
+                    sbr_vals = _range_values(rng_sbr, sv_sbr, rmin_sbr, rmax_sbr, rstep_sbr)
+                    sad_vals = _range_values(rng_sad, sv_sad, rmin_sad, rmax_sad, rstep_sad)
+                    sca_vals = _range_values(rng_sca, sv_sca, rmin_sca, rmax_sca, rstep_sca)
+                    ssb_vals = _range_values(rng_ssb, sv_ssb, rmin_ssb, rmax_ssb, rstep_ssb)
+                    swl_vals = _range_values(rng_swl, sv_swl, rmin_swl, rmax_swl, rstep_swl)
+
+                    import itertools
+                    combos = list(itertools.product(k_vals, ls_vals, tr_vals,
+                                                    sbr_vals, sad_vals, sca_vals, ssb_vals, swl_vals))
+                    total_combos = len(combos)
                     grid_rows, combo_i = [], 0
-                    for kv in k_vals:
-                        for lv in ls_vals:
-                            for tv in tr_vals:
-                                combo_i += 1
-                                prog_bar.progress(combo_i / total_combos)
-                                label_k = f"K={kv} " if not is_log_mode else ""
-                                prog_text.caption(f"⚙️ ({combo_i}/{total_combos})  {label_k}손절={lv}% 트레일={tv}%")
-                                r = _run_one(_make_params(kv, lv, tv))
-                                ret, n_tr, wr, mdd = _calc_summary(r)
-                                row = {"손절(%)": lv, "트레일(%)": tv}
-                                if not is_log_mode:
-                                    row["K"] = kv
-                                # 종목별 수익률 (로그 기반 모드)
-                                if is_log_mode:
-                                    for t in r["trades"]:
-                                        row[t["name"]] = round(t["pnl_rate"] * 100, 2)
-                                row.update({"전체수익률(%)": round(ret,2), "거래수": n_tr,
-                                            "승률(%)": round(wr,1), "MDD(%)": round(mdd,2)})
-                                grid_rows.append(row)
-                                _save_log({"timestamp":datetime.now().isoformat(),"type":"intraday_grid",
-                                           "date":actual_date,"K":kv,"loss_pct":lv,"trail_pct":tv,
-                                           "initial_capital":initial_capital,"return_pct":round(ret,2),
-                                           "trades":n_tr,"win_rate":round(wr,1),"mdd":round(mdd,2)})
+                    for (kv, lv, tv, sbrv, sadv, scav, ssbv, swlv) in combos:
+                        combo_i += 1
+                        prog_bar.progress(combo_i / total_combos)
+                        prog_text.caption(f"⚙️ ({combo_i}/{total_combos})  손절={lv}% 트레일={tv}%")
+                        r = _run_one(_make_params(kv, lv, tv, sbr=sbrv, sad=sadv, sca=scav, ssb=ssbv, swl=swlv))
+                        ret, n_tr, wr, mdd = _calc_summary(r)
+                        from backtest.report import calc_sharpe as _cs
+                        row = {"손절(%)": lv, "트레일(%)": tv}
+                        if not is_log_mode:
+                            row["K"] = kv
+                        if rng_sbr: row["돌파점"] = sbrv
+                        if rng_sad: row["AD점"]   = sadv
+                        if rng_sca: row["캔들점"] = scav
+                        if rng_ssb: row["강봉점"] = ssbv
+                        if rng_swl: row["관심점"] = swlv
+                        if is_log_mode:
+                            for t in r["trades"]:
+                                row[t["name"]] = round(t["pnl_rate"] * 100, 2)
+                        row.update({"전체수익률(%)": round(ret, 2), "거래수": n_tr,
+                                    "승률(%)": round(wr, 1), "MDD(%)": round(mdd, 2),
+                                    "샤프비율": round(_cs(r), 4)})
+                        grid_rows.append(row)
+                        _save_log({"timestamp": datetime.now().isoformat(), "type": "intraday_grid",
+                                   "date": actual_date, "K": kv, "loss_pct": lv, "trail_pct": tv,
+                                   "initial_capital": initial_capital, "return_pct": round(ret, 2),
+                                   "trades": n_tr, "win_rate": round(wr, 1), "mdd": round(mdd, 2)})
                     prog_bar.progress(1.0); prog_text.caption(f"✅ {total_combos}개 조합 완료!")
                     st.session_state["bt_grid"]   = grid_rows
                     st.session_state.pop("bt_result", None)
+                    st.session_state.pop("bt_bayes",  None)
                 else:
+                    # ── 단일 실행 ──────────────────────────────────────
                     prog_text.caption("⚙️ 계산 중...")
                     result = _run_one(_make_params(sv_k, sv_ls, sv_tr))
                     prog_bar.progress(1.0); prog_text.caption("✅ 완료!")
                     st.session_state["bt_result"] = result
-                    st.session_state.pop("bt_grid", None)
+                    st.session_state.pop("bt_grid",  None)
+                    st.session_state.pop("bt_bayes", None)
                     ret, n_tr, wr, mdd = _calc_summary(result)
-                    _save_log({"timestamp":datetime.now().isoformat(),"type":"intraday",
-                               "date":actual_date,"K":sv_k,"loss_pct":sv_ls,"trail_pct":sv_tr,
-                               "initial_capital":initial_capital,"return_pct":round(ret,2),
-                               "trades":n_tr,"win_rate":round(wr,1),"mdd":round(mdd,2)})
+                    _save_log({"timestamp": datetime.now().isoformat(), "type": "intraday",
+                               "date": actual_date, "K": sv_k, "loss_pct": sv_ls, "trail_pct": sv_tr,
+                               "initial_capital": initial_capital, "return_pct": round(ret, 2),
+                               "trades": n_tr, "win_rate": round(wr, 1), "mdd": round(mdd, 2)})
 
         except Exception as e:
             prog_text.empty()
@@ -1266,7 +1422,9 @@ with tab_backtest:
 
     # ── 결과 표시 ──
     st.divider()
-    if st.session_state.get("bt_grid"):
+    if st.session_state.get("bt_bayes"):
+        _show_bayes_result(st.session_state["bt_bayes"])
+    elif st.session_state.get("bt_grid"):
         _show_grid_result(st.session_state["bt_grid"])
     elif st.session_state.get("bt_result"):
         _show_single_result(st.session_state["bt_result"])

@@ -1,5 +1,5 @@
 """
-백테스트 엔진
+백테스트 엔진 (params 격리)
 실제 스케줄러(scheduler.py)와 동일한 하루 매매 사이클을 일봉 데이터로 시뮬레이션한다.
 
 사이클:
@@ -7,6 +7,10 @@
   → 트레일링스탑 / 하드손절 / 종가청산
   → 재스크리닝(당일 나머지 후보 순서대로) → ...
   → 15:20 강제 청산 (일봉 근사: 종가)
+
+변경 이력:
+- params dict 주입: sc 전역값 직접 참조 제거 (그리드/베이지안 격리 대응)
+- run_backtest(params=None): None이면 get_default_bt_params() 사용
 """
 import sys
 import os
@@ -14,17 +18,22 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import strategy_config as sc
-from backtest.screener_sim import screen_day
+from backtest.screener_sim import screen_day, get_default_bt_params
 
 
-def run_backtest(all_data, stock_list, start_date, end_date, initial_capital=1_000_000):
+def run_backtest(all_data, stock_list, start_date, end_date,
+                 initial_capital=1_000_000, params=None):
     """
     all_data      : {code: {date: ohlcv_row}}
     stock_list    : [{"code","name"}, ...]
+    params        : get_default_bt_params() 형식 dict.
+                    None이면 sc 전역값 스냅샷 사용 (하위 호환).
     반환          : {"trades", "daily_logs", "equity_curve",
                      "final_capital", "initial_capital"}
     """
-    # 공통 거래일 목록 (start_date ~ end_date, 오름차순)
+    if params is None:
+        params = get_default_bt_params()
+
     trading_days = _get_trading_days(all_data, start_date, end_date)
 
     capital      = float(initial_capital)
@@ -34,9 +43,7 @@ def run_backtest(all_data, stock_list, start_date, end_date, initial_capital=1_0
     cooldown_map = {}   # {code: date(str)} 마지막 청산일
 
     for date in trading_days:
-        day_result = _simulate_day(
-            date, all_data, stock_list, capital, cooldown_map
-        )
+        day_result = _simulate_day(date, all_data, stock_list, capital, cooldown_map, params)
 
         for trade in day_result["trades"]:
             capital += trade["pnl"]
@@ -45,8 +52,8 @@ def run_backtest(all_data, stock_list, start_date, end_date, initial_capital=1_0
 
         if day_result["trades"]:
             daily_logs.append({
-                "date":   date,
-                "trades": day_result["trades"],
+                "date":      date,
+                "trades":    day_result["trades"],
                 "capital_end": capital,
             })
 
@@ -63,61 +70,49 @@ def run_backtest(all_data, stock_list, start_date, end_date, initial_capital=1_0
 # 내부 함수
 # ──────────────────────────────────────────
 
-def _simulate_day(date, all_data, stock_list, capital, cooldown_map):
-    """
-    하루 매매 사이클 시뮬레이션.
-    당일 스크리닝 → [1]번 매매 → 재스크리닝(잔여 후보 순서) → 반복
-    """
-    # 당일 스크리닝
-    candidates = screen_day(all_data, date, stock_list)
-
-    # 쿨다운 중인 종목 제거
+def _simulate_day(date, all_data, stock_list, capital, cooldown_map, params):
+    """하루 매매 사이클: 스크리닝 → [1]번 매매 → 재스크리닝 → 반복"""
+    candidates = screen_day(all_data, date, stock_list, params)
     candidates = [
         c for c in candidates
-        if cooldown_map.get(c["code"]) != date  # 당일 이미 매매한 종목 제외
+        if cooldown_map.get(c["code"]) != date
     ]
 
     trades      = []
     trade_count = 0
+    max_trades  = params.get("MAX_TRADES_PER_DAY", sc.MAX_TRADES_PER_DAY)
 
-    while candidates and trade_count < sc.MAX_TRADES_PER_DAY:
-        # 1순위 후보 선택
+    while candidates and trade_count < max_trades:
         target = candidates.pop(0)
         code   = target["code"]
 
-        trade = _execute_trade(target, capital)
+        trade = _execute_trade(target, capital, params)
         if trade is None:
-            continue   # 자금 부족 → 다음 후보
+            continue
 
         capital += trade["pnl"]
         trade_count += 1
-        cooldown_map[code] = date  # 당일 재진입 금지
+        cooldown_map[code] = date
         trades.append(trade)
 
-        # 강제 청산 시간 이후면 추가 매매 없음 (일봉 근사: 종가청산이면 15:20 이후로 간주)
         if trade["reason"] in ("강제청산", "종가청산"):
             break
 
     return {"trades": trades}
 
 
-def _execute_trade(candidate, capital):
-    """
-    단일 종목 매매 시뮬레이션 (일봉 OHLC 근사)
-    반환: trade dict 또는 None(자금 부족)
-    """
+def _execute_trade(candidate, capital, params):
+    """단일 종목 매매 시뮬레이션 (일봉 OHLC 근사). 반환: trade dict 또는 None(자금 부족)"""
     today     = candidate["today"]
-    buy_price = candidate["buy_price"]   # 목표가에 체결 가정
+    buy_price = candidate["buy_price"]
 
-    quantity = int(capital * sc.INVEST_RATIO / buy_price)
+    invest_ratio = params.get("INVEST_RATIO", sc.INVEST_RATIO)
+    quantity     = int(capital * invest_ratio / buy_price)
     if quantity < 1:
         return None
 
-    sell_price, reason = _resolve_exit(today, buy_price)
-
-    cost     = quantity * buy_price
-    proceeds = quantity * sell_price
-    pnl      = proceeds - cost
+    sell_price, reason = _resolve_exit(today, buy_price, params)
+    pnl      = (sell_price - buy_price) * quantity
     pnl_rate = (sell_price - buy_price) / buy_price
 
     return {
@@ -135,31 +130,31 @@ def _execute_trade(candidate, capital):
     }
 
 
-def _resolve_exit(today, buy_price):
+def _resolve_exit(today, buy_price, params):
     """
     일봉 OHLC 기준 청산 가격 / 사유 결정
-    우선순위: 하드손절 > 트레일링스탑/고정익절 > 종가청산(강제청산 포함)
+    우선순위: 하드손절 > 트레일링스탑/고정익절 > 종가청산(강제청산)
     """
-    stop_loss_price = buy_price * (1 - sc.LOSS_RATE)
+    loss_rate       = params.get("LOSS_RATE",   sc.LOSS_RATE)
+    stop_loss_price = buy_price * (1 - loss_rate)
 
-    # 1) 하드 손절: 저가가 손절선 이하
     if today["low"] <= stop_loss_price:
         return int(stop_loss_price), "손절"
 
-    # 2) 트레일링 스탑 or 고정 익절
-    if sc.USE_TRAILING_STOP:
-        peak      = today["high"]   # 당일 고가를 피크 근사값으로 사용
+    if params.get("USE_TRAILING_STOP", sc.USE_TRAILING_STOP):
+        peak      = today["high"]
         peak_rate = (peak - buy_price) / buy_price
-        if peak_rate >= sc.TRAILING_STOP_ACTIVATE_RATE:
-            trailing_stop = peak * (1 - sc.TRAILING_STOP_RATE)
+        act_rate  = params.get("TRAILING_STOP_ACTIVATE_RATE", sc.TRAILING_STOP_ACTIVATE_RATE)
+        trail_rt  = params.get("TRAILING_STOP_RATE",          sc.TRAILING_STOP_RATE)
+        if peak_rate >= act_rate:
+            trailing_stop = peak * (1 - trail_rt)
             if today["close"] <= trailing_stop:
                 return int(trailing_stop), "트레일링스탑"
     else:
-        profit_target = buy_price * (1 + sc.PROFIT_RATE)
+        profit_target = buy_price * (1 + params.get("PROFIT_RATE", sc.PROFIT_RATE))
         if today["high"] >= profit_target:
             return int(profit_target), "익절"
 
-    # 3) 종가 청산 (15:20 강제 청산 ≈ 종가)
     return today["close"], "강제청산"
 
 

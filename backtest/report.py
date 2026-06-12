@@ -1,3 +1,22 @@
+import math
+
+
+def calc_sharpe(result) -> float:
+    """
+    샤프 비율 계산 (거래당 수익률 기준).
+    거래 횟수 < 2이면 0 반환.
+    """
+    trades = result.get("trades", [])
+    if len(trades) < 2:
+        return 0.0
+    rates = [t["pnl_rate"] for t in trades]
+    mean  = sum(rates) / len(rates)
+    std   = math.sqrt(sum((r - mean) ** 2 for r in rates) / len(rates))
+    if std == 0:
+        return 0.0
+    return mean / std
+
+
 def print_report(result, start_date, end_date, stock_pool_size):
     trades          = result["trades"]
     initial_capital = result["initial_capital"]
@@ -11,9 +30,9 @@ def print_report(result, start_date, end_date, stock_pool_size):
     win_rate      = len(wins) / total_trades * 100 if total_trades else 0
     avg_return    = sum(t["pnl_rate"] for t in trades) / total_trades * 100 if total_trades else 0
     mdd           = _calc_mdd(equity_curve)
+    sharpe        = calc_sharpe(result)
     active_days   = len(daily_logs)
 
-    # 청산 사유별 집계
     reasons = {}
     for t in trades:
         reasons[t["reason"]] = reasons.get(t["reason"], 0) + 1
@@ -28,6 +47,7 @@ def print_report(result, start_date, end_date, stock_pool_size):
     print(f"  초기 자금     : {initial_capital:>15,}원")
     print(f"  최종 자산     : {int(final_capital):>15,}원")
     print(f"  수익률        : {total_return:>+14.2f}%")
+    print(f"  샤프 비율     : {sharpe:>+14.4f}")
     print(f"  ────────────────────────────────────────────────")
     print(f"  매매 발생일   : {active_days}일")
     print(f"  총 거래 횟수  : {total_trades}회")
