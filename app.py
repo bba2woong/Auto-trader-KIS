@@ -990,7 +990,7 @@ with tab_backtest:
 
     bt_type = st.radio(
         "백테스팅 유형",
-        ["daily", "intraday"],
+        ["intraday", "daily"],
         format_func=lambda x: "📅 다일 (일봉 기반, 장기)" if x == "daily" else "⏱ 단타 (분봉 기반, 최근 7일)",
         horizontal=True,
     )
