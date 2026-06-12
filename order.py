@@ -49,6 +49,8 @@ def buy_stock(stock_code, quantity):
 
     order_no = data["output"]["ODNO"]
     print(f"  [매수 완료] 종목: {stock_code} | 수량: {quantity}주 | 주문번호: {order_no}")
+    from api import invalidate_balance_cache
+    invalidate_balance_cache()
     return order_no
 
 
@@ -85,19 +87,19 @@ def sell_stock(stock_code, quantity):
 
     order_no = data["output"]["ODNO"]
     print(f"  [매도 완료] 종목: {stock_code} | 수량: {quantity}주 | 주문번호: {order_no}")
+    from api import invalidate_balance_cache
+    invalidate_balance_cache()
     return order_no
 
 
 def get_holding_quantity(stock_code):
-    """특정 종목 보유 수량 조회"""
-    from api import get_balance
-    balance = get_balance()
-    holdings = balance["보유종목"]
-
-    for item in holdings:
+    """특정 종목 보유 수량 조회 (캐시 사용 — API 호출 최소화)"""
+    from api import get_balance_cached
+    balance = get_balance_cached()
+    for item in balance["보유종목"]:
         if item["pdno"] == stock_code:
-            return int(item["hldg_qty"])  # 보유 수량
-    return 0  # 보유 없음
+            return int(item["hldg_qty"])
+    return 0
 
 
 def test_order():

@@ -1,10 +1,39 @@
 import requests
 import urllib3
 import time
+import threading
 import config
 from auth import get_access_token
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ── 잔고 공유 캐시 (30초) ────────────────────────────────────────────
+# 여러 포지션 스레드가 동시에 get_balance()를 호출하면 500 오류 폭증.
+# 30초 이내 재호출은 캐시를 반환해 API 호출 횟수를 최소화한다.
+_balance_cache      = None
+_balance_cache_ts   = 0.0
+_balance_cache_ttl  = 30.0   # 초
+_balance_cache_lock = threading.Lock()
+
+
+def get_balance_cached():
+    """잔고 캐시 조회 (30초 TTL). HTS 수동매도 감지 등 빈번한 호출에 사용."""
+    global _balance_cache, _balance_cache_ts
+    with _balance_cache_lock:
+        if _balance_cache is not None and time.time() - _balance_cache_ts < _balance_cache_ttl:
+            return _balance_cache
+    result = get_balance()
+    with _balance_cache_lock:
+        _balance_cache    = result
+        _balance_cache_ts = time.time()
+    return result
+
+
+def invalidate_balance_cache():
+    """매수/매도 직후 캐시 강제 만료"""
+    global _balance_cache
+    with _balance_cache_lock:
+        _balance_cache = None
 
 def get_headers(tr_id):
     token = get_access_token()
