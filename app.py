@@ -1010,86 +1010,55 @@ with tab_backtest:
                                                            "watchlist":"관심종목만","custom":"직접 입력"}[x])
         custom_codes = st.text_input("종목 코드 (콤마 구분)", placeholder="005930,000660") if pool_option == "custom" else ""
     else:
-        # 단타: 날짜 + 초기자금만 (종목 풀은 매매 로그에서 자동)
+        # 단타: 날짜 + 초기자금 + 종목 풀
         with col1:
             bt_date = st.date_input("날짜 (최근 7일 이내)", value=datetime.now() - timedelta(days=1))
         with col3:
             initial_capital = st.number_input("초기 자금 (원)", value=10_000_000, step=1_000_000)
-        pool_option  = "log_based"
-        custom_codes = ""
+        pool_option = st.selectbox(
+            "종목 풀",
+            ["kospi", "watchlist", "custom", "full"],
+            format_func=lambda x: {
+                "kospi":     f"코스피200 상위 {sc.KOSPI_POOL_SIZE}개 + 관심종목",
+                "watchlist": "관심종목만",
+                "custom":    "직접 입력",
+                "full":      "전체 풀 (KOSPI200 전체 + 관심종목)",
+            }[x],
+            key="bt_intraday_pool",
+        )
+        custom_codes = st.text_input("종목 코드 (콤마 구분)", placeholder="005930,000660",
+                                     key="bt_custom_codes_intraday") if pool_option == "custom" else ""
 
     # ── 파라미터 범위 설정 (단타 전용) ──
     if bt_type == "intraday":
         st.divider()
 
-        # ── 매매 로그에서 당일 스크리닝 후보 불러오기 ──
+        # ── 당일 매매 로그 참고 (표시 전용, 종목 풀과 무관) ──
         date_str = bt_date.strftime("%Y%m%d")
         from trading_logger import load_log
-
-        log_events   = load_log(date_str)
+        log_events    = load_log(date_str)
+        bought_codes  = {e["code"] for e in log_events if e["event"] == "buy_executed"}
         screen_events = [e for e in log_events if e["event"] == "screening_result"]
 
-        if screen_events:
-            # 스크리닝 후보 종목 추출
-            # cand_map: {code: {**candidate_info, "entry_time": HHMMSS}}
-            # 같은 종목이 여러 라운드에 나오면 가장 처음 나온 시각(= 가장 이른 진입 기회)을 사용
-            cand_map = {}
-            for evt in screen_events:
-                ts_raw     = evt.get("ts", "093000")
-                entry_time = ts_raw.replace(":", "")[:6]   # "09:35:22" → "093522"
-                for c in evt.get("candidates", []):
-                    code = c["code"]
-                    if code not in cand_map:
-                        cand_map[code] = {**c, "entry_time": entry_time}
-                    # 이미 있으면 entry_time 유지 (첫 등장 시각 사용)
+        if bought_codes or screen_events:
+            with st.expander(f"📋 {date_str} 매매 로그 참고 — 실제 매수 종목", expanded=False):
+                cand_map = {}
+                for evt in screen_events:
+                    for c in evt.get("candidates", []):
+                        if c["code"] not in cand_map:
+                            cand_map[c["code"]] = c
+                if bought_codes:
+                    ref_cols = st.columns(3)
+                    for i, code in enumerate(sorted(bought_codes)):
+                        info     = cand_map.get(code, {})
+                        ai_score = info.get("score", "—")
+                        grade    = info.get("grade", "")
+                        name     = info.get("name", code)
+                        ref_cols[i % 3].success(f"**{name}** ({code})  AI:{ai_score}점 {grade}")
+                else:
+                    st.info("스크리닝 후보 있으나 실제 매수 종목 없음")
 
-            st.markdown(f"##### 📋 당일 스크리닝 후보 종목 ({date_str}, {len(cand_map)}개)")
-
-            # 실제 매수 종목 표시
-            bought_codes = {e["code"] for e in log_events if e["event"] == "buy_executed"}
-
-            # 종목 선택 체크박스
-            selected_codes = []
-            cols = st.columns(2)
-            for i, (code, c) in enumerate(cand_map.items()):
-                ai_score = c.get("score", "—")
-                grade    = c.get("grade", "")
-                bought   = "✅ 매수됨" if code in bought_codes else ""
-                label    = f"{c['name']} ({code})  AI:{ai_score}점  {grade}  {bought}"
-                default  = True  # 기본 전체 선택
-                if cols[i % 2].checkbox(label, value=default, key=f"bt_cand_{code}"):
-                    selected_codes.append(code)
-
-            if not selected_codes:
-                st.warning("최소 1개 이상 선택하세요.")
-
-            # 실제 포지션 수 / 포지션당 예산
-            actual_pos_count = len(bought_codes) if bought_codes else sc.MAX_POSITIONS
-            st.divider()
-            st.markdown("##### 💰 포지션 예산 설정")
-            n_positions = st.number_input(
-                "포지션 수 (당일 실제 매수 기준 자동입력, 수정 가능)",
-                min_value=1,
-                value=max(actual_pos_count, len(selected_codes)),
-                key="bt_n_positions"
-            )
-            budget_per_pos = initial_capital / n_positions
-            st.caption(f"포지션당 예산: **{budget_per_pos:,.0f}원**  =  초기자금 {initial_capital:,}원 ÷ {n_positions}개")
-
-            # 선택 종목 리스트 구성 (entry_time 포함)
-            stock_list_for_bt = [
-                {"code": c, "name": cand_map[c]["name"],
-                 "entry_time": cand_map[c].get("entry_time", "093000")}
-                for c in selected_codes
-            ]
-            pool_option = "log_based"
-
-        else:
-            st.info(f"📋 {date_str} 매매 로그 없음 — 표준 종목 풀로 진행합니다.")
-            selected_codes    = []        # 로그 없음 → 빈 리스트로 초기화
-            stock_list_for_bt = None
-            budget_per_pos    = initial_capital / sc.MAX_POSITIONS
-            n_positions       = sc.MAX_POSITIONS
+        budget_per_pos = initial_capital / sc.MAX_POSITIONS
 
         st.divider()
         st.markdown("##### 📐 파라미터 설정")
@@ -1125,11 +1094,7 @@ with tab_backtest:
                 return use_range, sv, None, None, None
 
         st.markdown("**트레이딩 파라미터**")
-        _log_mode_params = pool_option == "log_based" and bool(selected_codes)
-        if not _log_mode_params:
-            rng_k, sv_k, rmin_k, rmax_k, rstep_k = _param_row("K값",     sc.K,                      0.1, 1.0, 0.05, 0.3, 0.7, 0.1, ".2f")
-        else:
-            sv_k = sc.K; rng_k = False; rmin_k = rmax_k = rstep_k = None
+        rng_k, sv_k, rmin_k, rmax_k, rstep_k = _param_row("K값",     sc.K,                      0.1, 1.0, 0.05, 0.3, 0.7, 0.1, ".2f")
         rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls = _param_row("손절(%)",  sc.LOSS_RATE*100,          0.5, 5.0, 0.1,  1.0, 4.0, 0.5, ".1f")
         rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr = _param_row("트레일(%)", sc.TRAILING_STOP_RATE*100, 0.5, 5.0, 0.1,  1.0, 4.0, 0.5, ".1f")
 
@@ -1166,14 +1131,14 @@ with tab_backtest:
         rmin_sca = rmax_sca = rstep_sca = rmin_ssb = rmax_ssb = rstep_ssb = None
         rmin_swl = rmax_swl = rstep_swl = None
 
-    # ── 단타: 종목/파라미터 변경 감지 → 결과 자동 초기화 ──
+    # ── 단타: 파라미터 변경 감지 → 결과 자동 초기화 ──
     if bt_type == "intraday":
-        _sel_codes = selected_codes if pool_option == "log_based" and 'selected_codes' in dir() else []
         _fingerprint = (
-            tuple(sorted(_sel_codes)),
-            round(sv_ls, 2) if not rng_ls else (round(rmin_ls,2), round(rmax_ls,2), round(rstep_ls,2)),
-            round(sv_tr, 2) if not rng_tr else (round(rmin_tr,2), round(rmax_tr,2), round(rstep_tr,2)),
             bt_date.strftime("%Y%m%d"),
+            pool_option,
+            round(sv_k, 2) if not rng_k else (round(rmin_k, 2), round(rmax_k, 2), round(rstep_k, 2)),
+            round(sv_ls, 2) if not rng_ls else (round(rmin_ls, 2), round(rmax_ls, 2), round(rstep_ls, 2)),
+            round(sv_tr, 2) if not rng_tr else (round(rmin_tr, 2), round(rmax_tr, 2), round(rstep_tr, 2)),
             opt_mode,
             round(sv_sbr), round(sv_sad), round(sv_sca), round(sv_ssb), round(sv_swl),
             sv_llm, sv_dart, sv_minscore,
@@ -1187,14 +1152,11 @@ with tab_backtest:
     # ── 캐시 상태 표시 (단타) ──
     if bt_type == "intraday":
         st.divider()
-        date_str     = bt_date.strftime("%Y%m%d")
-        _cur_codes   = tuple(sorted(selected_codes)) if pool_option == "log_based" and 'selected_codes' in dir() else ()
-        _stocks_hash = str(hash(_cur_codes))[:8]
-        expected     = f"{date_str}_{pool_option}_{_stocks_hash}"
-        cache_key    = st.session_state.get("bt_cache_key", "")
-        if cache_key == expected:
+        expected  = f"{bt_date.strftime('%Y%m%d')}_{pool_option}"
+        cache_key = st.session_state.get("bt_cache_key", "")
+        if cache_key.startswith(expected):
             cached_n = len(st.session_state.get("bt_minute_data", {}))
-            st.success(f"✅ 캐시 사용 가능 — {date_str} / {cached_n}개 종목 로드됨")
+            st.success(f"✅ 캐시 사용 가능 — {bt_date.strftime('%Y%m%d')} / {cached_n}개 종목 로드됨")
         else:
             st.info("📥 캐시 없음 — 실행 시 데이터를 수집합니다.")
 
@@ -1213,15 +1175,13 @@ with tab_backtest:
         prog_text = st.empty()
         try:
             if bt_type == "intraday":
-                # 단타: 로그 기반 or 표준 풀 폴백
-                has_log = pool_option == "log_based" and bool(selected_codes)
-                if has_log:
-                    stock_list     = stock_list_for_bt
-                    budget_per_pos = initial_capital / st.session_state.get("bt_n_positions", sc.MAX_POSITIONS)
+                # 항상 선택된 종목 풀 전체 백테스팅
+                if pool_option == "full":
+                    from backtest.screener_sim import get_full_stock_pool
+                    stock_list = get_full_stock_pool()
                 else:
-                    # 로그 없거나 종목 미선택 → 표준 코스피+코스닥 풀
-                    stock_list     = _build_stock_list_ui("kospi", "")
-                    budget_per_pos = initial_capital * sc.INVEST_RATIO / sc.MAX_POSITIONS
+                    stock_list = _build_stock_list_ui(pool_option, custom_codes)
+                budget_per_pos = initial_capital / sc.MAX_POSITIONS
             else:
                 stock_list     = _build_stock_list_ui(pool_option, custom_codes)
                 budget_per_pos = initial_capital * sc.INVEST_RATIO / sc.MAX_POSITIONS
@@ -1271,8 +1231,7 @@ with tab_backtest:
                     actual_date  = st.session_state["bt_actual_date"]
                     prog_text.caption("✅ 캐시 데이터 사용")
 
-                from backtest.engine_intraday import run_intraday_backtest, run_log_intraday_backtest
-                is_log_mode = has_log   # 로그 있고 종목 선택된 경우만 True
+                from backtest.engine_intraday import run_intraday_backtest
 
                 def _make_params(kv, lv, tv,
                                  sbr=None, sad=None, sca=None, ssb=None, swl=None):
@@ -1297,16 +1256,10 @@ with tab_backtest:
                     }
 
                 def _run_one(params):
-                    if is_log_mode:
-                        # 로그 기반: 스크리닝 시각에 즉시 매수
-                        return run_log_intraday_backtest(
-                            minute_data, stock_list, budget_per_pos, params, actual_date
-                        )
-                    else:
-                        return run_intraday_backtest(
-                            minute_data, daily_data, stock_list, actual_date,
-                            initial_capital, params=params
-                        )
+                    return run_intraday_backtest(
+                        minute_data, daily_data, stock_list, actual_date,
+                        initial_capital, params=params
+                    )
 
                 if is_bayes:
                     # ── 베이지안 최적화 ─────────────────────────────────
@@ -1315,7 +1268,7 @@ with tab_backtest:
 
                     # 범위 체크된 파라미터만 최적화 bounds로 등록
                     _bayes_bounds = {}
-                    if not is_log_mode and rng_k:
+                    if rng_k:
                         _bayes_bounds["K"] = (rmin_k, rmax_k)
                     if rng_ls:
                         _bayes_bounds["LOSS_RATE"] = (rmin_ls / 100, rmax_ls / 100)
@@ -1357,7 +1310,7 @@ with tab_backtest:
 
                 elif is_grid:
                     # ── 그리드 서치 ────────────────────────────────────
-                    k_vals   = _range_values(rng_k,  sv_k,  rmin_k,  rmax_k,  rstep_k) if not is_log_mode else [sv_k]
+                    k_vals   = _range_values(rng_k,  sv_k,  rmin_k,  rmax_k,  rstep_k)
                     ls_vals  = _range_values(rng_ls, sv_ls, rmin_ls, rmax_ls, rstep_ls)
                     tr_vals  = _range_values(rng_tr, sv_tr, rmin_tr, rmax_tr, rstep_tr)
                     sbr_vals = _range_values(rng_sbr, sv_sbr, rmin_sbr, rmax_sbr, rstep_sbr)
@@ -1378,17 +1331,12 @@ with tab_backtest:
                         r = _run_one(_make_params(kv, lv, tv, sbr=sbrv, sad=sadv, sca=scav, ssb=ssbv, swl=swlv))
                         ret, n_tr, wr, mdd = _calc_summary(r)
                         from backtest.report import calc_sharpe as _cs
-                        row = {"손절(%)": lv, "트레일(%)": tv}
-                        if not is_log_mode:
-                            row["K"] = kv
+                        row = {"K": kv, "손절(%)": lv, "트레일(%)": tv}
                         if rng_sbr: row["돌파점"] = sbrv
                         if rng_sad: row["AD점"]   = sadv
                         if rng_sca: row["캔들점"] = scav
                         if rng_ssb: row["강봉점"] = ssbv
                         if rng_swl: row["관심점"] = swlv
-                        if is_log_mode:
-                            for t in r["trades"]:
-                                row[t["name"]] = round(t["pnl_rate"] * 100, 2)
                         row.update({"전체수익률(%)": round(ret, 2), "거래수": n_tr,
                                     "승률(%)": round(wr, 1), "MDD(%)": round(mdd, 2),
                                     "샤프비율": round(_cs(r), 4)})
