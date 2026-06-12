@@ -844,6 +844,37 @@ def _make_cb(prog_bar, prog_text, label):
         prog_text.caption(f"📥 {label}  ({cur}/{total})  {name}")
     return cb
 
+_BT_PRESET_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_presets.json")
+
+def _bt_load_presets() -> dict:
+    try:
+        import json
+        with open(_BT_PRESET_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _bt_save_presets(presets: dict):
+    import json
+    with open(_BT_PRESET_FILE, "w", encoding="utf-8") as f:
+        json.dump(presets, f, ensure_ascii=False, indent=2)
+
+# 프리셋에 저장/복원할 session_state 키 목록
+_BT_PRESET_KEYS = [
+    "bt_opt_mode",
+    "rng_K값", "sv_K값", "rmin_K값", "rmax_K값", "rstep_K값",
+    "rng_손절(%)", "sv_손절(%)", "rmin_손절(%)", "rmax_손절(%)", "rstep_손절(%)",
+    "rng_트레일(%)", "sv_트레일(%)", "rmin_트레일(%)", "rmax_트레일(%)", "rstep_트레일(%)",
+    "rng_변동성돌파(최대점)", "sv_변동성돌파(최대점)", "rmin_변동성돌파(최대점)", "rmax_변동성돌파(최대점)", "rstep_변동성돌파(최대점)",
+    "rng_AD Line 점수",   "sv_AD Line 점수",   "rmin_AD Line 점수",   "rmax_AD Line 점수",   "rstep_AD Line 점수",
+    "rng_캔들패턴(해머)", "sv_캔들패턴(해머)", "rmin_캔들패턴(해머)", "rmax_캔들패턴(해머)", "rstep_캔들패턴(해머)",
+    "rng_강봉(60분) 점수","sv_강봉(60분) 점수","rmin_강봉(60분) 점수","rmax_강봉(60분) 점수","rstep_강봉(60분) 점수",
+    "rng_관심종목 보너스","sv_관심종목 보너스","rmin_관심종목 보너스","rmax_관심종목 보너스","rstep_관심종목 보너스",
+    "sv_llm_fixed", "sv_dart_fixed", "sv_min_score",
+    "bt_n_trials",
+]
+
+
 def _build_stock_list_ui(pool_option, custom_codes):
     if pool_option == "kospi":
         from screener import build_screening_pool
@@ -1056,6 +1087,46 @@ with tab_backtest:
 
         budget_per_pos = initial_capital / sc.MAX_POSITIONS
 
+        # ── 프리셋 관리 ──────────────────────────────────────────
+        st.divider()
+        _presets = _bt_load_presets()
+        with st.expander("💾 파라미터 프리셋", expanded=False):
+            # 저장
+            c_pn, c_ps = st.columns([3, 1])
+            with c_pn:
+                _pname = st.text_input("프리셋 이름", key="bt_preset_name", placeholder="예) 공격적 손절 세팅")
+            with c_ps:
+                st.markdown("&nbsp;", unsafe_allow_html=True)
+                if st.button("💾 현재 설정 저장", key="bt_preset_save", use_container_width=True):
+                    if _pname.strip():
+                        _snap = {k: st.session_state.get(k) for k in _BT_PRESET_KEYS}
+                        _presets[_pname.strip()] = _snap
+                        _bt_save_presets(_presets)
+                        st.success(f"'{_pname.strip()}' 저장 완료!")
+                        st.rerun()
+                    else:
+                        st.warning("이름을 입력하세요.")
+            # 불러오기 / 삭제
+            if _presets:
+                c_ps2, c_pl, c_pd = st.columns([3, 1, 1])
+                with c_ps2:
+                    _sel = st.selectbox("저장된 프리셋", list(_presets.keys()), key="bt_preset_sel")
+                with c_pl:
+                    st.markdown("&nbsp;", unsafe_allow_html=True)
+                    if st.button("📂 불러오기", key="bt_preset_load", use_container_width=True):
+                        for _k, _v in _presets[_sel].items():
+                            if _v is not None:
+                                st.session_state[_k] = _v
+                        st.rerun()
+                with c_pd:
+                    st.markdown("&nbsp;", unsafe_allow_html=True)
+                    if st.button("🗑 삭제", key="bt_preset_del", use_container_width=True):
+                        del _presets[_sel]
+                        _bt_save_presets(_presets)
+                        st.rerun()
+            else:
+                st.caption("저장된 프리셋 없음")
+
         st.divider()
         st.markdown("##### 📐 파라미터 설정")
 
@@ -1136,7 +1207,7 @@ with tab_backtest:
             round(sv_ls, 2) if not rng_ls else (round(rmin_ls, 2), round(rmax_ls, 2), round(rstep_ls, 2)),
             round(sv_tr, 2) if not rng_tr else (round(rmin_tr, 2), round(rmax_tr, 2), round(rstep_tr, 2)),
             opt_mode,
-            round(sv_sbr), round(sv_sad), round(sv_sca), round(sv_ssb), round(sv_swl),
+            round(sv_sbr or 0), round(sv_sad or 0), round(sv_sca or 0), round(sv_ssb or 0), round(sv_swl or 0),
             sv_llm, sv_dart, sv_minscore,
         )
         if st.session_state.get("bt_fingerprint") != _fingerprint:
