@@ -243,6 +243,18 @@ BUY_THRESHOLD        = 60   # BUY 판정 기준 (strategy_config.CONFIRM_SCORE_M
 
 ---
 
+## 🔬 LangGraph 파이프라인 구조
+
+![Pipeline Structure](assets/pipeline_structure.svg)
+
+조건부 엣지(Gate)로 불필요한 API 호출을 최소화합니다.
+- Gate 1: 변동성 점수 < 10 → 즉시 SKIP (Perplexity/DART 호출 없음)
+- Gate 2: 기술적 합산 < 25 → 즉시 SKIP
+- Gate 3: 기술적 합산 < 40 → 즉시 SKIP
+- 최종 후보만 외부 API(Perplexity, DART) 호출
+
+---
+
 ## ⚙️ 주요 기능
 
 ### 1. 자동 스크리닝
