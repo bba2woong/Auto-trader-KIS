@@ -311,60 +311,16 @@ kis_trader/
 ## 🚀 빠른 시작
 
 ### 요구사항
-- Python 3.11.x
+- Python 3.11+
 - Node.js 18+
-- Git
 - 한국투자증권 Open API 계정
-
-### 사전 설치
-
-#### 1. Python 3.11.9
-
-> ⚠️ Python 3.12 이상은 일부 패키지와 호환되지 않을 수 있습니다. **반드시 3.11.x 버전을 설치하세요.**
-
-[Python 3.11.9 다운로드 (Windows 64bit)](https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe)
-
-설치 시 **"Add Python to PATH"** 옵션을 반드시 체크하세요.
-
-설치 확인:
-```bash
-python --version
-# Python 3.11.9
-```
-
-#### 2. Node.js
-
-[Node.js LTS 다운로드](https://nodejs.org)
-
-LTS 버전을 설치하세요. 설치 확인:
-```bash
-node --version
-# v18.x.x 이상
-```
-
-#### 3. Git
-
-[Git 다운로드](https://git-scm.com/download/win)
-
-기본값으로 설치하세요. 설치 확인:
-```bash
-git --version
-```
-
----
 
 ### 설치
 
 ```bash
 git clone https://github.com/bba2woong/Auto-trader-KIS.git
 cd Auto-trader-KIS
-```
 
-> ⚠️ **`setup.bat`은 반드시 관리자 권한으로 실행해야 합니다.**  
-> 작업 스케줄러(WatchDog) 등록에 관리자 권한이 필요합니다.  
-> `Win + R` → `cmd` 입력 → `Ctrl + Shift + Enter` (관리자 실행) → 아래 명령 실행
-
-```bash
 # 자동 설치 (venv 생성 + 패키지 설치 + Electron 의존성 + 작업 스케줄러 등록)
 setup.bat
 ```
