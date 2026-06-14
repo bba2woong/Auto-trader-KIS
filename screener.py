@@ -723,9 +723,9 @@ _GRADE_LABEL = {
     "B": "B [변동성돌파]",
     "C": "C [해머패턴]",
 }
-_PATTERN_EMOJI = {
-    "hammer":      "🔨",
-    "hanging_man": "⚠️",
+_PATTERN_LABEL = {
+    "hammer":      "[해머]",
+    "hanging_man": "[행잉맨]",
 }
 
 
@@ -790,16 +790,16 @@ def run_screening(progress_cb=None, stop_event=None):
     print(f"  전체: {total}개 | 통과: {len(passed)}개 | 오류: {len(failed)}개")
 
     if passed:
-        print(f"\n  ✅ 매수 후보:")
+        print(f"\n  [매수 후보]")
         for s in passed:
-            pat_str = f"  {_PATTERN_EMOJI.get(s['패턴'], '')} " if s["패턴"] else "    "
+            pat_str = f"  {_PATTERN_LABEL.get(s['패턴'], '')} " if s["패턴"] else "    "
             print(f"    {_GRADE_LABEL[s['grade']]:22s}{pat_str}"
                   f"{s['name']} ({s['code']}) | {s['현재가']:,}원 | 목표가 {s['목표가']:,}원")
     else:
-        print(f"  ❌ 조건 충족 종목 없음")
+        print(f"  [제외] 조건 충족 종목 없음")
 
     if warned:
-        print(f"\n  ⚠️  행잉맨 감지 (하락 반전 경고): {', '.join(warned)}")
+        print(f"\n  [경고] 행잉맨 감지 (하락 반전 경고): {', '.join(warned)}")
 
     sc.update_candidates(passed)
     return passed

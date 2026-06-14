@@ -69,7 +69,7 @@ def run_bayesian_optimization_multi(
     daily_data          : {code: {date: ohlcv_row}}
     param_bounds        : {param_name: (min, max), ...}
     반환                : {"study","best_params","best_sharpe","best_trial",
-                           "n_trials","all_trials"}
+                           "n_trials","all_trials","best_result"}
     """
     _require_optuna()
     from backtest.engine_multi_intraday import run_multi_intraday_backtest
@@ -86,7 +86,14 @@ def run_bayesian_optimization_multi(
 
     study = _new_study()
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-    return _study_to_result(study)
+    out = _study_to_result(study)
+
+    # 최적 파라미터로 1회 재실행 → 매매 내역 상세 포함
+    best_params_full = _suggest_params(study.best_trial, param_bounds)
+    out["best_result"] = run_multi_intraday_backtest(
+        minute_data_by_date, daily_data, stock_list, initial_capital, best_params_full
+    )
+    return out
 
 
 def run_bayesian_optimization_daily(

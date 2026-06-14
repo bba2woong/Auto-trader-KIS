@@ -9,7 +9,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11-blue?style=flat-square&logo=python)](https://python.org)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.x-red?style=flat-square&logo=streamlit)](https://streamlit.io)
 [![Electron](https://img.shields.io/badge/Electron-28-47848F?style=flat-square&logo=electron)](https://electronjs.org)
-[![Version](https://img.shields.io/badge/Version-1.1-brightgreen?style=flat-square)]()
+[![Version](https://img.shields.io/badge/Version-1.2-brightgreen?style=flat-square)]()
 [![License](https://img.shields.io/badge/License-Personal-lightgrey?style=flat-square)]()
 
 </div>
@@ -40,11 +40,118 @@
 
 ✅ **v1.1** 베이지안 최적화 기반 백테스팅 시스템 — 1분봉 로컬 캐시 + optuna TPE 파라미터 자동 탐색
 
+✅ **v1.2** LangGraph 파이프라인 모니터 — 조기종료(Early Exit) 게이트 + 트레이딩 탭 통합
+
 🏆 실전/모의투자 실제 운용 경험 - 작성 시점까지 수익률 **xxx%**
 
 ---
 
 ## 📋 릴리즈 노트
+
+### v1.2 — LangGraph 파이프라인 모니터 (2026-06-14)
+
+> 스크리닝 250개 종목 전체를 7개 분석 노드로 처리할 때 API 호출 비용과 소요 시간이 과다했습니다.  
+> LangGraph 조건부 엣지를 이용한 **조기종료(Early Exit)** 구조로 API 비용을 최소화하고,  
+> 트레이딩 탭에서 상위 종목의 노드별 분석 결과를 실시간으로 시각화합니다.
+
+#### 🆕 신규 기능
+
+| 기능 | 설명 |
+|------|------|
+| **LangGraph 파이프라인** | 7개 분석 노드를 그래프 구조로 연결. 각 노드의 실행 상태·점수·소요시간을 실시간 카드로 표시 |
+| **3단계 조기종료 게이트** | 저점수 종목은 외부 API 호출 전에 자동 SKIP — LLM/DART 비용 절감 |
+| **트레이딩 탭 통합** | 별도 앱 없이 트레이딩 탭 내 컴팩트 1행 8열 카드 UI로 즉시 분석 가능 |
+| **배점 단일 출처 관리** | `langgraph_monitor/score_config.py` 한 곳에서 모든 배점·임계값 관리 |
+
+#### 🔬 LangGraph 파이프라인 상세
+
+##### 왜 LangGraph를 선택했나
+
+일반적인 순차 함수 호출은 모든 노드를 무조건 실행합니다. 변동성 점수가 낮아 이미 스킵이 확실한 종목에도 LLM API(Perplexity) 와 DART API를 호출하면 **불필요한 비용과 지연**이 발생합니다.
+
+LangGraph의 `add_conditional_edges`는 각 노드 완료 후 **다음 노드로 갈지, 바로 집계 노드로 점프할지** 런타임에 결정합니다. 이로써:
+- 저점수 종목은 외부 API 호출 없이 즉시 SKIP
+- 고점수 종목만 LLM·DART 분석 진행
+- 향후 실제 API 연결 시 **노드 함수만 교체**하면 파이프라인 구조 변경 불필요
+
+##### 파이프라인 구조
+
+```
+[입력] 종목 코드
+    │
+    ▼
+① 변동성 돌파   (max 40점)  ─── Gate 1: 점수 < 10 → ─────────────────────┐
+    │ 통과                                                                    │
+    ▼                                                                         │
+② AD Line       (max 15점)  ─── Gate 2: 합산 < 15 → ────────────────────┐  │
+    │ 통과                                                                 │  │
+    ▼                                                                      │  │
+③ 캔들 패턴     (max 10점)  ─ (항상 실행)                                │  │
+    │                                                                      │  │
+    ▼                                                                      │  │
+④ 60분봉 강봉   (max 15점)  ─── Gate 3: 합산 < 25 → ─────────────────┐  │  │
+    │ 통과 (여기서부터 외부 API)                                        │  │  │
+    ▼                                                                   │  │  │
+⑤ 뉴스 감성 LLM (max 10점)                                            │  │  │
+    │                                                                   │  │  │
+    ▼                                                                   │  │  │
+⑥ DART 공시     (max 10점)                                            │  │  │
+    │                                                                   │  │  │
+    ▼                                                                   │  │  │
+⑦ 관심종목 보너스(max 10점)                                           │  │  │
+    │                                                                   │  │  │
+    ▼                                                                   │  │  │
+⑧ 스코어 집계   (총 110점) ◄──────────────────────────────────────────┘  │  │
+    │                       ◄─────────────────────────────────────────────┘  │
+    │                       ◄────────────────────────────────────────────────┘
+    ▼
+[출력] BUY (≥60점) / SKIP
+```
+
+##### 조기종료 게이트 기준
+
+| 게이트 | 위치 | 조건 | 효과 |
+|--------|------|------|------|
+| **Gate 1** | 변동성 돌파 후 | 변동성 점수 < 10점 | AD Line ~ 관심종목 전부 건너뜀 |
+| **Gate 2** | AD Line 후 | 변동성 + AD 합산 < 15점 | 캔들 ~ 관심종목 전부 건너뜀 |
+| **Gate 3** | 60분봉 강봉 후 | 기술 4개 합산 < 25점 | **LLM·DART·관심종목 API 호출 없음** |
+
+> Gate 3가 핵심입니다. 기술적 점수가 낮은 대다수 종목이 여기서 걸러져 **외부 API 호출 비용이 대폭 절감**됩니다.
+
+##### UI 사용법
+
+**트레이딩 탭에서 사용:**
+1. 🚀 트레이딩 탭으로 이동
+2. **스크리닝 상위 종목** 셀렉트박스에서 분석할 종목 선택  
+   (스크리닝을 먼저 실행하면 상위 5개가 자동으로 채워짐)
+3. **▶ 분석** 버튼 클릭
+4. 8개 노드 카드가 순서대로 업데이트됨:
+   - **초록 테두리**: 점수 ≥ max/3 (양호)
+   - **빨간 테두리**: 점수 < max/3 (저조)
+   - **⏭ 건너뜀**: 게이트 미달로 조기종료
+5. 하단 배너에서 최종 **BUY / SKIP** 판단과 근거 확인
+
+**배점·게이트 임계값 변경:**  
+`langgraph_monitor/score_config.py` 파일 한 곳만 수정하면 노드 카드 UI, scoring_node 집계, 게이트 조건이 모두 자동 반영됩니다.
+
+```python
+# score_config.py 예시
+SCORE_VOLATILITY_MAX = 40   # 변동성 돌파 최대 점수
+VOLATILITY_GATE      = 10   # Gate 1 임계값
+BUY_THRESHOLD        = 60   # BUY 판정 기준 (strategy_config.CONFIRM_SCORE_MIN 연동)
+```
+
+#### 🔄 변경 사항
+
+| 항목 | 이전 (v1.1) | 이후 (v1.2) |
+|------|------------|------------|
+| 파이프라인 모니터 | 독립 Streamlit 앱 (`monitor_app.py`) | 트레이딩 탭 내 컴팩트 통합 |
+| 탭 구성 | 스크리닝·트레이딩·백테스팅·매매로그·파라미터·**파이프라인모니터** 6개 | 파이프라인모니터 탭 제거 → 트레이딩 탭에 내장, 총 5개 탭 |
+| 배점 관리 | 각 노드 파일에 하드코딩 | `score_config.py` 단일 출처 |
+| 조기종료 | 없음 (전 노드 순차 실행) | 3단계 게이트 조건부 엣지 |
+| screener.py 출력 | 이모지 포함 (`✅ ❌ ⚠️`) | 텍스트 레이블 (`[매수 후보] [제외] [경고]`) |
+
+---
 
 ### v1.1 — 백테스팅 전면 개편 (2026-06-13)
 
@@ -99,6 +206,7 @@
 | **Frontend** | Streamlit · Plotly · Electron |
 | **AI / 데이터** | Perplexity sonar · DART Open API · yfinance |
 | **최적화** | optuna (TPE 샘플러 · 베이지안 최적화) |
+| **파이프라인** | LangGraph (StateGraph · 조건부 엣지 · 조기종료) |
 | **알림** | Telegram Bot API (선택봇 + 알람봇 2개) |
 | **인프라** | Windows Task Scheduler · WatchDog |
 | **버전관리** | Git / GitHub |
@@ -122,12 +230,16 @@
 ![Score System](assets/score_system.svg)
 
 종목별 최대 110점 산출 후 점수 구간에 따라 자동 매수 / 텔레그램 확인 / 스킵으로 라우팅합니다.
+해당 점수는 고정값이 아니며, Bayesian Optimization을 통해 Sharp Ratio 최고값에 해당하는 파라미터로 변경 필요
+`scorer.py` 에서 Score 파라미터 변경 가능
 
 | 구간 | 동작 |
 |------|------|
 | 90점 이상 | 🤖 텔레그램 확인 없이 자동 매수 |
 | 60~89점 | 📱 텔레그램으로 선택 요청 (5분 타임아웃) |
 | 60점 미만 | ⏭ 스킵 |
+
+매수 방법 별 점수 구간 파라미터는 `strategy_config.py`에서 변경 가능
 
 ---
 
@@ -234,6 +346,14 @@ kis_trader/
 │   ├── llm_client.py             # Perplexity API 뉴스 분석
 │   └── dart_client.py            # DART 공시 분석
 │
+├── langgraph_monitor/            # LangGraph 파이프라인 모니터 (v1.2 신규)
+│   ├── score_config.py           # 배점 상수 단일 출처 (SSOT) — 변경 시 이 파일만 수정
+│   ├── state.py                  # TradeState TypedDict (7개 노드 점수 + 실행시간 필드)
+│   ├── nodes.py                  # 분석 노드 7개 + scoring_node (현재 Mock, 실제 API 교체 예정)
+│   ├── graph.py                  # StateGraph 빌드 + 3단계 조건부 엣지 (조기종료)
+│   ├── pipeline_monitor_tab.py   # app.py 탭용 render 함수 (전체·컴팩트 2종)
+│   └── monitor_app.py            # 독립 실행용 Streamlit 앱 (참고용)
+│
 ├── backtest/
 │   ├── engine_multi_intraday.py  # 다중 날짜 단타 백테스트 엔진 (v1.1 신규)
 │   │                             #   10:00 스크리닝 → 동시 매수 → 15:20 강제청산
@@ -291,6 +411,16 @@ kis_trader/
 **문제:** 파라미터가 8개 이상(K·손절·트레일링·Scorer 배점 5종)으로 늘어나면서 전수 그리드 서치가 수천 ~ 수만 조합으로 폭증
 
 **해결:** optuna TPE(Tree-structured Parzen Estimator) 샘플러 도입. n_trials=50~200회 탐색으로 그리드 서치 대비 수십 배 빠르게 최적 파라미터를 수렴. 목적함수는 샤프비율(수익/변동성)로 과적합 방지
+
+### 7. 스크리닝 250종목 전체 API 호출 비용 문제 (v1.2)
+**문제:** LLM·DART API를 250개 종목 전부에 호출하면 비용 과다. 변동성 점수가 낮아 어차피 SKIP될 종목에도 외부 API가 낭비됨
+
+**해결:** LangGraph `add_conditional_edges`로 3단계 게이트 구현. 기술적 점수(변동성·AD·캔들·강봉)가 임계값 미달이면 LLM·DART 호출 없이 즉시 scoring 노드로 점프. 실제 API 연결 시 노드 함수(`nodes.py`)만 교체하면 파이프라인 구조 변경 불필요
+
+### 8. 배점 상수 분산 관리 문제 (v1.2)
+**문제:** 노드 파일(`nodes.py`)과 UI 파일(`pipeline_monitor_tab.py`)에 max 점수·임계값이 각각 하드코딩되어 배점 변경 시 여러 파일을 동시에 수정해야 했음
+
+**해결:** `langgraph_monitor/score_config.py`를 단일 출처(SSOT)로 분리. `BUY_THRESHOLD`는 `strategy_config.CONFIRM_SCORE_MIN`을 동적으로 읽어 전략 설정과 자동 연동됨
 
 ---
 
@@ -369,10 +499,11 @@ cd Auto-trader-KIS
 setup.bat
 ```
 
-### 추가 패키지 (v1.1)
+### 추가 패키지
 
 ```bash
-pip install optuna
+pip install optuna        # v1.1 베이지안 최적화
+pip install langgraph     # v1.2 파이프라인 모니터
 ```
 
 ### 환경변수 등록 (`sysdm.cpl` → 환경변수)
@@ -388,17 +519,17 @@ DART_API_KEY (선택)
 
 > 백테스팅은 KIS API 인증 없이 yfinance만으로 동작합니다.
 
-### 실행
+## 실행
 
-```bash
-# WatchDog 포함 실행 (자동 재시작)
-watchdog.bat
+### 방법 1 — Electron 앱 실행 (권장)
+`KIS Auto Trader.exe` 더블클릭
 
-# 또는 단순 실행
-KIS_Trader_실행.bat
-```
+부팅 시 자동 시작 등록:
+Windows 작업 스케줄러에 등록되어 있어 PC 시작 후 30초 내 자동 실행됩니다.
 
-브라우저에서 `http://localhost:8501` 접속
+### 방법 2 — WatchDog 포함 실행 (장 중 안정성 강화)
+watchdog.bat 더블클릭
+(Electron/Streamlit 크래시 시 10초 내 자동 재시작)
 
 ---
 
@@ -435,11 +566,14 @@ KIS_Trader_실행.bat
 **백테스트 통계 유의성 부족**  
 아직 실전 거래 횟수가 충분하지 않아 백테스트 결과의 통계적 신뢰도가 낮습니다. 데이터가 누적되는 시점에 전략 파라미터 전면 재검토를 진행할 예정입니다.
 
-**AI 기반 파라미터 자동 최적화 (v1.2 목표)**  
+**LangGraph 실제 API 연결 (v1.3 목표)**  
+v1.2의 파이프라인 노드는 Mock 데이터 기반입니다. `langgraph_monitor/nodes.py`의 각 노드 함수에서 `time.sleep + random` 부분을 실제 screener·scorer 함수로 교체하면 파이프라인 구조 변경 없이 실 데이터 분석이 가능합니다. 조기종료 게이트 임계값은 실전 운용 데이터를 쌓은 후 정밀 튜닝할 예정입니다.
+
+**AI 기반 파라미터 자동 최적화 (v1.3 목표)**  
 v1.1에서 베이지안 최적화를 도입했지만, 아직은 User-Driven(사람이 범위 설정)입니다. 추후 당일 거래 데이터를 기반으로 AI가 최적 파라미터를 자동 도출하고 백테스트까지 실행하는 AI-Driven Optimization 구조로 발전시키는 것이 목표입니다.
 
 ---
 
 <div align="center">
-<sub>Made with Python · Streamlit · Electron · optuna</sub>
+<sub>Made with Python · Streamlit · Electron · optuna · LangGraph</sub>
 </div>

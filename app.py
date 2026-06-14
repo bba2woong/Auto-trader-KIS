@@ -14,6 +14,10 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import threading
+from langgraph_monitor.pipeline_monitor_tab import (
+    render_pipeline_monitor_tab,
+    render_pipeline_monitor_compact,
+)
 
 # ──────────────────────────────────────────
 # 로그 캡처 (scheduler print → 화면 출력)
@@ -737,6 +741,11 @@ with tab_trade:
 
     if not running and t_mode != "—":
         st.info("⏹ 모니터링 정지됨 — 재시작 버튼을 누르면 KIS 잔고에서 포지션을 자동 복구합니다.")
+
+    st.divider()
+
+    # ── 파이프라인 분석 (컴팩트) ──
+    render_pipeline_monitor_compact()
 
     st.divider()
 
