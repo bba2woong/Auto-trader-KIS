@@ -22,13 +22,11 @@
 **/with Claude Code & Perplexity & Open AI Codex**
 
 개발 기간: 2026.04 ~ 현재  
-기술 스택: Python · Streamlit · Electron · Telegram API · Perplexity AI · DART API · KIS API
+기술 스택: Python · Streamlit · Electron · LangGraph · Telegram API · Perplexity AI · DART API
 
 핵심 성과:
 
-✅ 래리 윌리엄스 변동성 돌파 전략 기반 자동매매 구현
-
-✅ LLM AI + Dart 공시 + 차트 분석 점수 시스템으로 종목 선별 자동화
+✅ 래리 윌리엄스 변동성 돌파 LLM AI + Dart 공시 + 차트 분석 점수 시스템으로 종목 선별 자동화
 
 ✅ 멀티쓰레드로 최대 N개 종목 동시 포지셔닝&모니터링
 
@@ -74,39 +72,17 @@ LangGraph의 `add_conditional_edges`는 각 노드 완료 후 **다음 노드로
 - 고점수 종목만 LLM·DART 분석 진행
 - 향후 실제 API 연결 시 **노드 함수만 교체**하면 파이프라인 구조 변경 불필요
 
-##### 파이프라인 구조
+#### LangGraph 파이프라인 구조
 
-```
-[입력] 종목 코드
-    │
-    ▼
-① 변동성 돌파   (max 40점)  ─── Gate 1: 점수 < 10 → ─────────────────────┐
-    │ 통과                                                                    │
-    ▼                                                                         │
-② AD Line       (max 15점)  ─── Gate 2: 합산 < 15 → ────────────────────┐  │
-    │ 통과                                                                 │  │
-    ▼                                                                      │  │
-③ 캔들 패턴     (max 10점)  ─ (항상 실행)                                │  │
-    │                                                                      │  │
-    ▼                                                                      │  │
-④ 60분봉 강봉   (max 15점)  ─── Gate 3: 합산 < 25 → ─────────────────┐  │  │
-    │ 통과 (여기서부터 외부 API)                                        │  │  │
-    ▼                                                                   │  │  │
-⑤ 뉴스 감성 LLM (max 10점)                                            │  │  │
-    │                                                                   │  │  │
-    ▼                                                                   │  │  │
-⑥ DART 공시     (max 10점)                                            │  │  │
-    │                                                                   │  │  │
-    ▼                                                                   │  │  │
-⑦ 관심종목 보너스(max 10점)                                           │  │  │
-    │                                                                   │  │  │
-    ▼                                                                   │  │  │
-⑧ 스코어 집계   (총 110점) ◄──────────────────────────────────────────┘  │  │
-    │                       ◄─────────────────────────────────────────────┘  │
-    │                       ◄────────────────────────────────────────────────┘
-    ▼
-[출력] BUY (≥60점) / SKIP
-```
+![Pipeline Structure](assets/pipeline_structure.svg)
+
+조건부 엣지(Gate)로 불필요한 API 호출을 최소화합니다.
+- Gate 1: 변동성 점수 < 10 → 즉시 SKIP (Perplexity/DART 호출 없음)
+- Gate 2: 기술적 합산 < 25 → 즉시 SKIP
+- Gate 3: 기술적 합산 < 40 → 즉시 SKIP
+- 최종 후보만 외부 API(Perplexity, DART) 호출
+
+---
 
 ##### 조기종료 게이트 기준
 
@@ -240,18 +216,6 @@ BUY_THRESHOLD        = 60   # BUY 판정 기준 (strategy_config.CONFIRM_SCORE_M
 | 60점 미만 | ⏭ 스킵 |
 
 매수 방법 별 점수 구간 파라미터는 `strategy_config.py`에서 변경 가능
-
----
-
-## 🔬 LangGraph 파이프라인 구조
-
-![Pipeline Structure](assets/pipeline_structure.svg)
-
-조건부 엣지(Gate)로 불필요한 API 호출을 최소화합니다.
-- Gate 1: 변동성 점수 < 10 → 즉시 SKIP (Perplexity/DART 호출 없음)
-- Gate 2: 기술적 합산 < 25 → 즉시 SKIP
-- Gate 3: 기술적 합산 < 40 → 즉시 SKIP
-- 최종 후보만 외부 API(Perplexity, DART) 호출
 
 ---
 
